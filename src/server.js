@@ -1,25 +1,34 @@
 require('dotenv').config();
 const app = require('./app');
+const mongoose = require('mongoose');
 const connectDB = require('./config/database');
 
-// Connect to MongoDB
-console.log('[DATABASE] Attempting to connect to MongoDB...');
-connectDB()
-  .then(() => console.log('[DATABASE] MongoDB connection successful'))
-  .catch(err => console.error('[DATABASE] MongoDB connection failed:', err));
+// Connect to MongoDB and verify connection
+const verifyDBConnection = async () => {
+  try {
+    console.log('Verifying database connection...');
+    // Check if we're connected
+    if (mongoose.connection.readyState !== 1) {
+      console.log('Not connected, attempting to connect...');
+      await connectDB();
+    }
+    
+    // Test database operation
+    const collections = await mongoose.connection.db.listCollections().toArray();
+    console.log('Database collections:', collections.map(c => c.name).join(', '));
+    
+    console.log('Database connection verified successfully.');
+    return true;
+  } catch (error) {
+    console.error('Database verification failed:', error);
+    return false;
+  }
+};
 
-// Make sure PORT is a number
-const PORT = parseInt(process.env.PORT) || 3000;
+const PORT = process.env.PORT || 3000;
 
 // Function to find an available port
 const findAvailablePort = async (port) => {
-  // Ensure port is a valid number
-  port = parseInt(port);
-  if (isNaN(port) || port < 0 || port >= 65536) {
-    console.log(`[SERVER] Invalid port ${port}, using default port 3000`);
-    port = 3000;
-  }
-  
   const net = require('net');
   return new Promise((resolve, reject) => {
     const server = net.createServer();
@@ -39,51 +48,37 @@ const findAvailablePort = async (port) => {
 // Start server
 const startServer = async () => {
   try {
-    console.log(`[SERVER] Attempting to start server on port ${PORT}...`);
+    // Verify DB connection first
+    const dbConnected = await verifyDBConnection();
+    if (!dbConnected) {
+      console.error('Could not establish database connection. Server will not start.');
+      process.exit(1);
+    }
+    
     const availablePort = await findAvailablePort(PORT);
     const server = app.listen(availablePort, () => {
-      console.log(`[SERVER] Server is running on port ${availablePort}`);
-      console.log(`[SERVER] Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`[SERVER] API endpoints available at http://localhost:${availablePort}/api/`);
+      console.log(`Server is running on port ${availablePort}`);
+      console.log(`API URL: http://localhost:${availablePort}/api`);
     });
 
     // Handle server errors
     server.on('error', (error) => {
       if (error.code === 'EADDRINUSE') {
-        console.log(`[SERVER] Port ${availablePort} is in use, trying next port...`);
+        console.log(`Port ${availablePort} is in use, trying next port...`);
         startServer();
       } else {
-        console.error('[SERVER] Server error:', error);
-        console.error('[SERVER] Error stack:', error.stack);
+        console.error('Server error:', error);
       }
     });
 
     // Handle process termination
     process.on('SIGTERM', () => {
-      console.log('[SERVER] SIGTERM received. Shutting down gracefully');
+      console.log('SIGTERM received. Shutting down gracefully');
       server.close(() => {
-        console.log('[SERVER] Process terminated');
-      });
-    });
-    
-    // Handle uncaught exceptions
-    process.on('uncaughtException', (error) => {
-      console.error('[SERVER] UNCAUGHT EXCEPTION! ');
-      console.error('[SERVER] Error:', error.name, error.message);
-      console.error('[SERVER] Error stack:', error.stack);
-      console.log('[SERVER] Shutting down...');
-      server.close(() => {
-        process.exit(1);
-      });
-    });
-    
-    // Handle unhandled rejections
-    process.on('unhandledRejection', (error) => {
-      console.error('[SERVER] UNHANDLED REJECTION! ');
-      console.error('[SERVER] Error:', error);
-      console.log('[SERVER] Shutting down...');
-      server.close(() => {
-        process.exit(1);
+        mongoose.connection.close(false, () => {
+          console.log('MongoDB connection closed.');
+          console.log('Process terminated');
+        });
       });
     });
 
