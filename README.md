@@ -55,6 +55,8 @@ npm start
 
 ### Food Analysis
 - POST `/api/food/analyze` - Analyze food image and return calorie information
+- POST `/api/food/add-analyzed` - Add analyzed food to daily calories and recent meals
+- GET `/api/food/daily-calories` - Get daily calorie count
 
 ### Steps Tracking
 - POST `/api/steps/update` - Update user's step count

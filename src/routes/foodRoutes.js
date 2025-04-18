@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const multer = require('multer');
 const foodController = require('../controllers/foodController');
+const auth = require('../middleware/auth');
 
 // Configure multer for memory storage
 const storage = multer.memoryStorage();
@@ -19,7 +20,16 @@ const upload = multer({
   }
 });
 
-// Food analysis route
+// Food analysis route (no auth required)
 router.post('/analyze', upload.single('image'), foodController.analyzeFood);
+
+// Routes that require authentication
+router.use(auth);
+
+// Add analyzed food to daily calories and recent meals
+router.post('/add-analyzed', foodController.addAnalyzedFood);
+
+// Get daily calorie count
+router.get('/daily-calories', foodController.getDailyCalories);
 
 module.exports = router; 

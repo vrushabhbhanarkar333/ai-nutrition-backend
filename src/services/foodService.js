@@ -148,9 +148,9 @@ function determineMealType(foodName) {
   if (breakfastFoods.some(food => lowerFoodName.includes(food))) return 'breakfast';
   if (lunchFoods.some(food => lowerFoodName.includes(food))) return 'lunch';
   if (dinnerFoods.some(food => lowerFoodName.includes(food))) return 'dinner';
-  if (snackFoods.some(food => lowerFoodName.includes(food))) return 'snack';
   
-  return 'meal';
+  // Default to snack if no specific meal type is identified
+  return 'snack';
 }
 
 function determineHealthiness(foodInfo) {
