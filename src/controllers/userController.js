@@ -5,7 +5,18 @@ const userService = require('../services/userService');
 const userController = {
   register: async (req, res) => {
     try {
-      const { username, email, password, dailyStepGoal, preferences } = req.body;
+      // Log the raw request body for debugging
+      console.log('Registration request body:', req.body);
+      
+      // Validate that required fields are present
+      const { username, email, password, name, dailyStepGoal, preferences } = req.body;
+      
+      if (!username || !email || !password) {
+        return res.status(400).json({
+          success: false,
+          error: 'Username, email, and password are required'
+        });
+      }
 
       // Check if user already exists
       const existingUser = await User.findOne({ 
@@ -23,6 +34,7 @@ const userController = {
       const user = new User({
         username,
         email,
+        name: name || username, // Use name if provided, otherwise use username
         password,
         dailyStepGoal: dailyStepGoal || 10000,
         preferences
@@ -46,14 +58,25 @@ const userController = {
           user: {
             id: user._id,
             username: user.username,
+            name: user.name,
             email: user.email,
             dailyStepGoal: user.dailyStepGoal,
-            preferences: user.preferences
+            preferences: user.preferences,
+            created_at: user.createdAt
           }
         }
       });
     } catch (error) {
       console.error('Error in user registration:', error);
+      
+      // Provide more specific error message for JSON parsing errors
+      if (error instanceof SyntaxError && error.message.includes('JSON')) {
+        return res.status(400).json({
+          success: false,
+          error: 'Invalid JSON format in request body. Please check your request format.'
+        });
+      }
+      
       res.status(500).json({
         success: false,
         error: error.message

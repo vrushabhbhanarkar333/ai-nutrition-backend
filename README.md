@@ -65,7 +65,7 @@ npm start
 
 ### AI Chat
 - POST `/api/chat/text` - Text-based chat with AI
-- POST `/api/chat/voice` - Voice-based chat with AI
+- POST `/api/chat/voice` - Voice-based chat,/api/ai/chat` -tion about nutrition, health, and fitness
 
 ## Security
 

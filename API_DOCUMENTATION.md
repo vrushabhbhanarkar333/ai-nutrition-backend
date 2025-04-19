@@ -293,3 +293,35 @@ Authorization: Bearer <token>
 ```
 
 The token is obtained by logging in with the user's credentials.
+
+##on Endpoint
+
+### AI Chat
+
+Allows users to have a conversation with the AI assistant about nutrition, health, and fitness.
+
+**Endpoint:** `POST /api/ai/chat`
+
+**Authentication:** Required (Bearer Token)
+
+**Request:**
+- Content-Type: `application/json`
+- Body:
+```json
+{
+  "message": "What are good sources of protein for vegetarians?",
+  "context": ["We were discussing vegetarian diets", "I mentioned I don't eat meat"]
+}
+```
+Note: The `context` array is optional and can be used to provide conversation history.
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "message": "There are many excellent plant-based protein sources for vegetarians. Some of the best options include:\n\n1. Legumes: Lentils, chickpeas, beans (black, kidney, pinto)\n2. Tofu, tempeh, and edamame (all made from soybeans)\n3. Seitan (wheat gluten)\n4. Nutritional yeast\n5. Hemp seeds, chia seeds, and flax seeds\n6. Nuts and nut butters (almonds, peanuts, cashews)\n7. Quinoa and amaranth (complete protein grains)\n8. Greek yogurt and cottage cheese (if you consume dairy)\n9. Plant-based protein powders (pea, hemp, brown rice)\n\nCombining different plant proteins throughout the day helps ensure you get all essential amino acids. For example, rice and beans together form a complete protein.",
+    "timestamp": "2023-06-15T14:32:10.123Z"
+  }
+}
+```

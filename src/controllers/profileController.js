@@ -36,7 +36,24 @@ const profileController = {
   // Create new profile
   createProfile: async (req, res) => {
     try {
-      const { height, weight, fitnessGoals, activityLevel } = req.body;
+      const { 
+        height, 
+        weight, 
+        fitness_goal, 
+        activity_level, 
+        age, 
+        gender, 
+        dietary_restrictions 
+      } = req.body;
+
+      // Validate required fields
+      if (!height || !weight || !fitness_goal || !activity_level) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required fields: height, weight, fitness_goal, and activity_level are required'
+        });
+      }
+
       const userId = req.user._id; // Assuming user is authenticated
 
       // Check if profile already exists
@@ -48,19 +65,41 @@ const profileController = {
         });
       }
 
+      // Create new profile with all fields
       const profile = new Profile({
         userId,
         height,
         weight,
-        fitnessGoals,
-        activityLevel
+        fitness_goal,
+        activity_level,
+        age,
+        gender,
+        dietary_restrictions
       });
 
       await profile.save();
 
+      // Get user info to include in response
+      const user = req.user;
+
       res.status(201).json({
         success: true,
-        data: profile
+        data: {
+          id: user._id,
+          username: user.username,
+          email: user.email,
+          name: user.name || user.username,
+          height: profile.height,
+          weight: profile.weight,
+          fitness_goal: profile.fitness_goal,
+          activity_level: profile.activity_level,
+          age: profile.age,
+          gender: profile.gender,
+          dietary_restrictions: profile.dietary_restrictions,
+          profile_picture: profile.profilePicture,
+          created_at: profile.createdAt,
+          updated_at: profile.updatedAt
+        }
       });
     } catch (error) {
       console.error('Error creating profile:', error);
@@ -84,9 +123,27 @@ const profileController = {
         });
       }
 
+      // Get user info to include in response
+      const user = req.user;
+
       res.json({
         success: true,
-        data: profile
+        data: {
+          id: user._id,
+          username: user.username,
+          email: user.email,
+          name: user.name || user.username,
+          height: profile.height,
+          weight: profile.weight,
+          fitness_goal: profile.fitness_goal,
+          activity_level: profile.activity_level,
+          age: profile.age,
+          gender: profile.gender,
+          dietary_restrictions: profile.dietary_restrictions,
+          profile_picture: profile.profilePicture,
+          created_at: profile.createdAt,
+          updated_at: profile.updatedAt
+        }
       });
     } catch (error) {
       console.error('Error getting profile:', error);
@@ -103,26 +160,66 @@ const profileController = {
       const userId = req.user._id;
       const updates = req.body;
 
-      const profile = await Profile.findOne({ userId });
-      if (!profile) {
-        return res.status(404).json({
+      // Validate that at least one field is provided
+      if (Object.keys(updates).length === 0) {
+        return res.status(400).json({
           success: false,
-          error: 'Profile not found'
+          error: 'At least one field must be provided for update'
         });
       }
 
-      // Update fields
-      Object.keys(updates).forEach(key => {
-        if (key !== 'userId' && key !== '_id') {
-          profile[key] = updates[key];
-        }
-      });
+      // Check if required fields are present for creating a new profile
+      if (!updates.height || !updates.weight || !updates.fitness_goal || !updates.activity_level) {
+        return res.status(400).json({
+          success: false,
+          error: 'Missing required fields: height, weight, fitness_goal, and activity_level are required to create a profile'
+        });
+      }
+
+      // Find profile or create a new one if it doesn't exist
+      let profile = await Profile.findOne({ userId });
+      if (!profile) {
+        console.log('Profile not found, creating a new one');
+        profile = new Profile({
+          userId,
+          ...updates
+        });
+      } else {
+        // Update fields
+        const allowedFields = [
+          'height', 'weight', 'fitness_goal', 'activity_level', 
+          'age', 'gender', 'dietary_restrictions', 'name'
+        ];
+        
+        allowedFields.forEach(field => {
+          if (updates[field] !== undefined) {
+            profile[field] = updates[field];
+          }
+        });
+      }
 
       await profile.save();
 
+      // Get user info to include in response
+      const user = req.user;
+
       res.json({
         success: true,
-        data: profile
+        data: {
+          id: user._id,
+          username: user.username,
+          email: user.email,
+          name: user.name || user.username,
+          height: profile.height,
+          weight: profile.weight,
+          fitness_goal: profile.fitness_goal,
+          activity_level: profile.activity_level,
+          age: profile.age,
+          gender: profile.gender,
+          dietary_restrictions: profile.dietary_restrictions,
+          profile_picture: profile.profilePicture,
+          updated_at: profile.updatedAt
+        }
       });
     } catch (error) {
       console.error('Error updating profile:', error);
@@ -180,5 +277,7 @@ const profileController = {
     }
   }
 };
+
+module.exports = { profileController, upload };
 
 module.exports = { profileController, upload }; 

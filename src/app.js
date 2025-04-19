@@ -7,13 +7,29 @@ const chatRoutes = require('./routes/chatRoutes');
 const stepsRoutes = require('./routes/stepsRoutes');
 const profileRoutes = require('./routes/profileRoutes');
 const mealRoutes = require('./routes/mealRoutes');
+const aiConversationRoutes = require('./routes/aiConversationRoutes');
 const fs = require('fs');
 
 const app = express();
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+
+// Custom JSON parser with better error handling
+app.use(express.json({
+  verify: (req, res, buf, encoding) => {
+    try {
+      JSON.parse(buf);
+    } catch (e) {
+      res.status(400).json({
+        success: false,
+        error: 'Invalid JSON format in request body. Please check your request format.'
+      });
+      throw new Error('Invalid JSON');
+    }
+  }
+}));
+
 app.use(express.urlencoded({ extended: true }));
 
 // Request logging middleware
@@ -49,6 +65,7 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/steps', stepsRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/meals', mealRoutes);
+app.use('/api/ai', aiConversationRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
