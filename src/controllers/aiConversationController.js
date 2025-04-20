@@ -17,16 +17,16 @@ const aiConversationController = {
 
       console.log(`Processing AI conversation for user ${userId}: "${message}"`);
 
-      // Prepare the prompt with nutrition context
-      let prompt = "You are a nutrition and health assistant. Provide helpful, accurate, and detailed information about nutrition, health, fitness, and wellness. Provide helpful, accurate, and detailed information about nutrition, health, fitness, and wellness. Provide helpful, accurate, and detailed information about nutrition, health, fitness, and wellness. ";
-      
-      // Add context if provided
-      if (context && context.length > 0) {
-        prompt += "Based on our previous conversation: " + context.join(" ") + ". ";
-      }
-      
-      // Add the user's message
-      prompt += `User question: ${message}`;
+
+      let prompt = "You are a nutrition and exercise coach. Your entire response must be in 2-3 short paragraphs with no special characters. Never use asterisks, bullet points, dashes or any symbols. Do not format text in any way. Keep total response under 100 words. Provide only the most essential advice in plain conversational sentences. Answer the user's question directly in brief paragraphs.";
+
+// Add context if provided
+if (context && context.length > 0) {
+  prompt += "Based on our previous conversation: " + context.join(" ") + ". ";
+}
+
+// Add the user's message
+prompt += `User question: ${message}`;
 
       // Call Gemini API for conversation
       console.log('Calling Gemini API for conversation...');
@@ -48,8 +48,35 @@ const aiConversationController = {
       }
 
       // Extract AI response
-      const aiResponse = geminiResponse.data.candidates[0].content.parts[0].text;
-      console.log(`AI response: "${aiResponse.substring(0, 100)}..."`);
+      let aiResponse = geminiResponse.data.candidates[0].content.parts[0].text;
+      
+      // Clean up the response - remove any special characters or formatting
+      aiResponse = aiResponse
+        .replace(/\*/g, '') // Remove asterisks
+        .replace(/\n+/g, ' ') // Replace multiple newlines with a single space
+        .replace(/\s{2,}/g, ' ') // Replace multiple spaces with a single space
+        .replace(/^[^a-zA-Z0-9]+/, '') // Remove non-alphanumeric characters at the start
+        .replace(/[^\w\s.,!?:]/g, '') // Remove any remaining special characters except basic punctuation
+        .trim(); // Trim whitespace
+      
+      // Make sure the response starts with "Coach:" if it doesn't already
+      if (!aiResponse.startsWith('Coach:')) {
+        aiResponse = 'Coach: ' + aiResponse;
+      }
+      
+      // Enforce character limit (approximately 150 characters for 2-3 short sentences)
+      if (aiResponse.length > 150) {
+        // Find the last sentence end within the limit
+        const lastSentenceEnd = aiResponse.substring(0, 150).lastIndexOf('.');
+        if (lastSentenceEnd > 50) {
+          aiResponse = aiResponse.substring(0, lastSentenceEnd + 1);
+        } else {
+          // If no sentence end found, just truncate
+          aiResponse = aiResponse.substring(0, 150);
+        }
+      }
+      
+      console.log(`AI response: "${aiResponse}"`);
 
       res.json({
         success: true,
