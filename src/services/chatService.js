@@ -72,7 +72,7 @@ const chatService = {
         }
       });
       
-      let prompt = "You are a nutrition and exercise coach. Keep responses conversational and concise.";
+      let prompt = "You are a helpful AI nutrition and fitness assistant. Provide informative, friendly, and conversational responses. You can analyze food images, answer nutrition questions, and provide fitness advice. Maintain a helpful and supportive tone throughout the conversation.";
       let imageContent = '';
 
       // If there's an image, analyze it first
@@ -149,7 +149,7 @@ const chatService = {
             }
           })
           .sort({ createdAt: -1 })
-          .limit(5)
+          .limit(15)  // Increased from 5 to 15 for better conversation context
           .lean();
           
           // Debug: Log history retrieval results

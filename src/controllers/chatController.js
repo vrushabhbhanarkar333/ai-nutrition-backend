@@ -49,7 +49,18 @@ const chatController = {
         }
 
         const { message, conversationId, parentMessageId } = req.body;
-        const userId = req.user._id;
+        
+        // Get userId from the decoded token (could be _id or userId depending on how the token was created)
+        const userId = req.user._id || req.user.userId;
+        
+        if (!userId) {
+          const errorResponse = { 
+            success: false, 
+            message: 'User authentication failed. Please log in again.' 
+          };
+          logResponse(ENDPOINT_SEND, errorResponse);
+          return res.status(401).json(errorResponse);
+        }
         
         if (!message) {
           const errorResponse = { 
@@ -203,7 +214,17 @@ const chatController = {
       // Debug: Log request
       logRequest(ENDPOINT_HISTORY, req);
       
-      const userId = req.user._id;
+      const userId = req.user._id || req.user.userId;
+      
+      if (!userId) {
+        const errorResponse = { 
+          success: false, 
+          message: 'User authentication failed. Please log in again.' 
+        };
+        logResponse(ENDPOINT_HISTORY, errorResponse);
+        return res.status(401).json(errorResponse);
+      }
+      
       const { conversationId, limit = 50, before } = req.query;
       
       let query = { userId };
@@ -313,7 +334,17 @@ const chatController = {
       // Debug: Log request
       logRequest(ENDPOINT_DELETE, req);
       
-      const userId = req.user._id;
+      const userId = req.user._id || req.user.userId;
+      
+      if (!userId) {
+        const errorResponse = { 
+          success: false, 
+          message: 'User authentication failed. Please log in again.' 
+        };
+        logResponse(ENDPOINT_DELETE, errorResponse);
+        return res.status(401).json(errorResponse);
+      }
+      
       const { conversationId } = req.params;
 
       if (!conversationId) {

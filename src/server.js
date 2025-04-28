@@ -3,6 +3,7 @@ const app = require('./app');
 const mongoose = require('mongoose');
 const connectDB = require('./config/database');
 const { initNotificationSchedules } = require('./services/notificationService');
+const { initializeChatTable } = require('./services/chatService');
 
 const verifyDBConnection = async () => {
   try {
@@ -54,6 +55,16 @@ const startServer = async () => {
       
       // Initialize notification schedules
       initNotificationSchedules();
+      
+      // Initialize vector database tables
+      try {
+        console.log('Initializing vector database tables...');
+        initializeChatTable()
+          .then(() => console.log('Vector database tables initialized successfully'))
+          .catch(err => console.error('Error initializing vector database:', err));
+      } catch (error) {
+        console.error('Failed to initialize vector database:', error);
+      }
     });
 
     server.on('error', (error) => {

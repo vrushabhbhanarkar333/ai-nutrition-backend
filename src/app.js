@@ -7,7 +7,6 @@ const chatRoutes = require('./routes/chatRoutes');
 const stepsRoutes = require('./routes/stepsRoutes');
 const profileRoutes = require('./routes/profileRoutes');
 const mealRoutes = require('./routes/mealRoutes');
-const aiConversationRoutes = require('./routes/aiConversationRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const fs = require('fs');
 
@@ -74,7 +73,6 @@ app.use('/api/chat', chatRoutes);
 app.use('/api/steps', stepsRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/meals', mealRoutes);
-app.use('/api/ai', aiConversationRoutes);
 app.use('/api/notifications', notificationRoutes);
 
 // Error handling middleware

@@ -6,15 +6,21 @@ const authMiddleware = {
     const token = authHeader && authHeader.split(' ')[1];
 
     if (!token) {
-      return res.status(401).json({ message: 'Access token is required' });
+      return res.status(401).json({ success: false, message: 'Access token is required' });
     }
 
     try {
       const decoded = jwt.verify(token, process.env.JWT_SECRET);
-      req.user = decoded;
+      
+      // Set the user object with both _id and userId for compatibility
+      req.user = {
+        ...decoded,
+        _id: decoded.userId // Add _id property for backward compatibility
+      };
+      
       next();
     } catch (error) {
-      return res.status(403).json({ message: 'Invalid or expired token' });
+      return res.status(403).json({ success: false, message: 'Invalid or expired token' });
     }
   },
 

@@ -26,6 +26,17 @@ const chatSchema = new mongoose.Schema({
     type: Boolean,
     required: true
   },
+  // Vector embedding for semantic search
+  embedding: {
+    type: [Number],
+    default: null,
+    index: false // MongoDB is not optimized for vector search, we'll use ClickHouse
+  },
+  // Flag to track if this message has been embedded
+  isEmbedded: {
+    type: Boolean,
+    default: false
+  },
   metadata: {
     type: Map,
     of: String,
