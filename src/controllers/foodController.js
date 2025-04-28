@@ -35,10 +35,19 @@ const foodController = {
       
       console.log('Analysis result:', result);
 
-      res.json({
-        success: true,
-        data: result
-      });
+      // If there was an error in the analysis but not a server error
+      if (result.error) {
+        res.json({
+          success: false,
+          error: result.message,
+          data: result
+        });
+      } else {
+        res.json({
+          success: true,
+          data: result
+        });
+      }
     } catch (error) {
       console.error('Error in foodController:', error);
       res.status(500).json({ 
