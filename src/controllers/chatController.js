@@ -1,26 +1,382 @@
-const chatService = require('../services/chatService');
+const chatService = require('../services/chatService').chatService;
+const Chat = require('../models/Chat');
+const multer = require('multer');
+const { v4: uuidv4 } = require('uuid');
+const path = require('path');
+const { logRequest, logResponse, logError } = require('../utils/debugLogger');
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, 'uploads/chat-images');
+  },
+  filename: (req, file, cb) => {
+    cb(null, Date.now() + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith('image/')) {
+      return cb(new Error('Only images are allowed'));
+    }
+    cb(null, true);
+  }
+}).single('image');
+
+const ENDPOINT_SEND = 'api/chat/message';
 
 const chatController = {
   sendMessage: async (req, res) => {
     try {
-      const { message } = req.body;
-      const userId = req.user.id;
-      const response = await chatService.processMessage(userId, message);
-      res.json(response);
+      upload(req, res, async (err) => {
+        // Debug: Log initial request (before multer processing)
+        logRequest(ENDPOINT_SEND, {
+          body: req.body,
+          file: req.file ? { 
+            filename: req.file.filename,
+            mimetype: req.file.mimetype,
+            size: req.file.size
+          } : null,
+          user: req.user ? { id: req.user._id } : null
+        });
+        
+        if (err) {
+          const errorResponse = { success: false, message: err.message };
+          logResponse(ENDPOINT_SEND, errorResponse);
+          return res.status(400).json(errorResponse);
+        }
+
+        const { message, conversationId, parentMessageId } = req.body;
+        const userId = req.user._id;
+        
+        if (!message) {
+          const errorResponse = { 
+            success: false, 
+            message: 'Message is required' 
+          };
+          logResponse(ENDPOINT_SEND, errorResponse);
+          return res.status(400).json(errorResponse);
+        }
+
+        // Create or continue conversation
+        const currentConversationId = conversationId || uuidv4();
+        
+        // Debug: Log conversation details
+        logRequest(`${ENDPOINT_SEND}/conversation`, {
+          userId,
+          conversationId: currentConversationId,
+          parentMessageId,
+          hasImage: !!req.file
+        });
+
+        // Save user message
+        const userMessage = new Chat({
+          userId,
+          conversationId: currentConversationId,
+          parentMessageId,
+          message,
+          imageUrl: req.file ? `/uploads/chat-images/${req.file.filename}` : null,
+          isAI: false
+        });
+        await userMessage.save();
+        
+        // Debug: Log saved user message
+        logResponse(`${ENDPOINT_SEND}/user-message`, {
+          messageId: userMessage._id,
+          conversationId: userMessage.conversationId,
+          message: userMessage.message.substring(0, 50) + (userMessage.message.length > 50 ? '...' : ''),
+          hasImage: !!userMessage.imageUrl
+        });
+
+        // Get AI response
+        try {
+          // Debug: Log AI processing request
+          logRequest(`${ENDPOINT_SEND}/ai-process`, {
+            userId,
+            messageId: userMessage._id,
+            conversationId: currentConversationId,
+            hasImage: !!userMessage.imageUrl
+          });
+          
+          const response = await chatService.processMessage(userId, message, {
+            conversationId: currentConversationId,
+            parentMessageId: userMessage._id.toString(),
+            imageUrl: userMessage.imageUrl
+          });
+          
+          // Debug: Log AI processing response
+          logResponse(`${ENDPOINT_SEND}/ai-process`, {
+            messageLength: response.message.length,
+            hasImageAnalysis: !!response.imageAnalysis
+          });
+
+          // Save AI response
+          const aiMessage = new Chat({
+            userId,
+            conversationId: currentConversationId,
+            parentMessageId: userMessage._id.toString(),
+            message: response.message,
+            isAI: true
+          });
+          await aiMessage.save();
+          
+          // Debug: Log saved AI message
+          logResponse(`${ENDPOINT_SEND}/ai-message`, {
+            messageId: aiMessage._id,
+            conversationId: aiMessage.conversationId,
+            messageLength: aiMessage.message.length
+          });
+
+          const successResponse = {
+            success: true,
+            data: {
+              conversationId: currentConversationId,
+              messages: [
+                {
+                  id: userMessage._id,
+                  message: userMessage.message,
+                  imageUrl: userMessage.imageUrl,
+                  isAI: false,
+                  timestamp: userMessage.createdAt
+                },
+                {
+                  id: aiMessage._id,
+                  message: aiMessage.message,
+                  isAI: true,
+                  timestamp: aiMessage.createdAt
+                }
+              ]
+            }
+          };
+          
+          // Debug: Log final response
+          logResponse(ENDPOINT_SEND, successResponse);
+          
+          res.json(successResponse);
+        } catch (aiError) {
+          // Debug: Log AI processing error
+          logError(`${ENDPOINT_SEND}/ai-process`, aiError);
+          
+          // Still return the user message even if AI processing failed
+          const errorResponse = {
+            success: false,
+            error: aiError.message || 'Failed to process AI response',
+            data: {
+              conversationId: currentConversationId,
+              messages: [
+                {
+                  id: userMessage._id,
+                  message: userMessage.message,
+                  imageUrl: userMessage.imageUrl,
+                  isAI: false,
+                  timestamp: userMessage.createdAt
+                }
+              ]
+            }
+          };
+          
+          logResponse(ENDPOINT_SEND, errorResponse);
+          res.status(500).json(errorResponse);
+        }
+      });
     } catch (error) {
-      res.status(500).json({ message: error.message });
+      console.error('Error in sendMessage:', error);
+      
+      // Debug: Log error
+      logError(ENDPOINT_SEND, error);
+      
+      const errorResponse = { 
+        success: false, 
+        message: error.message || 'Failed to process message' 
+      };
+      
+      res.status(500).json(errorResponse);
     }
   },
 
   getChatHistory: async (req, res) => {
+    const ENDPOINT_HISTORY = 'api/chat/history';
+    
     try {
-      const userId = req.user.id;
-      const history = await chatService.getChatHistory(userId);
-      res.json(history);
+      // Debug: Log request
+      logRequest(ENDPOINT_HISTORY, req);
+      
+      const userId = req.user._id;
+      const { conversationId, limit = 50, before } = req.query;
+      
+      let query = { userId };
+      
+      if (conversationId) {
+        query.conversationId = conversationId;
+      }
+      
+      if (before) {
+        query.createdAt = { $lt: new Date(before) };
+      }
+      
+      // Debug: Log database query
+      logRequest(`${ENDPOINT_HISTORY}/db-query`, {
+        query,
+        limit,
+        sort: { createdAt: -1 }
+      });
+
+      const messages = await Chat.find(query)
+        .sort({ createdAt: -1 })
+        .limit(parseInt(limit))
+        .lean();
+        
+      // Debug: Log query results
+      logResponse(`${ENDPOINT_HISTORY}/db-query`, {
+        count: messages.length,
+        conversationIds: [...new Set(messages.map(m => m.conversationId))],
+        timeRange: messages.length > 0 ? {
+          oldest: messages[messages.length - 1].createdAt,
+          newest: messages[0].createdAt
+        } : null
+      });
+
+      // Group messages by conversation
+      const conversations = messages.reduce((acc, msg) => {
+        if (!acc[msg.conversationId]) {
+          acc[msg.conversationId] = [];
+        }
+        acc[msg.conversationId].push({
+          id: msg._id,
+          message: msg.message,
+          imageUrl: msg.imageUrl,
+          isAI: msg.isAI,
+          parentMessageId: msg.parentMessageId,
+          timestamp: msg.createdAt
+        });
+        return acc;
+      }, {});
+      
+      // Debug: Log conversation grouping
+      logResponse(`${ENDPOINT_HISTORY}/grouping`, {
+        conversationCount: Object.keys(conversations).length,
+        messageCountByConversation: Object.entries(conversations).map(([id, msgs]) => ({
+          id,
+          count: msgs.length
+        }))
+      });
+
+      const successResponse = {
+        success: true,
+        data: {
+          conversations: Object.entries(conversations).map(([id, messages]) => ({
+            id,
+            messages: messages.reverse()
+          }))
+        }
+      };
+      
+      // Debug: Log response (with truncated message content)
+      const debugResponse = {
+        ...successResponse,
+        data: {
+          conversations: successResponse.data.conversations.map(conv => ({
+            id: conv.id,
+            messageCount: conv.messages.length,
+            firstMessage: conv.messages.length > 0 ? {
+              id: conv.messages[0].id,
+              isAI: conv.messages[0].isAI,
+              timestamp: conv.messages[0].timestamp
+            } : null
+          }))
+        }
+      };
+      logResponse(ENDPOINT_HISTORY, debugResponse);
+      
+      res.json(successResponse);
     } catch (error) {
-      res.status(500).json({ message: error.message });
+      console.error('Error in getChatHistory:', error);
+      
+      // Debug: Log error
+      logError(ENDPOINT_HISTORY, error);
+      
+      const errorResponse = { 
+        success: false, 
+        message: error.message || 'Failed to fetch chat history' 
+      };
+      
+      res.status(500).json(errorResponse);
+    }
+  },
+
+  deleteConversation: async (req, res) => {
+    const ENDPOINT_DELETE = 'api/chat/conversation/:conversationId';
+    
+    try {
+      // Debug: Log request
+      logRequest(ENDPOINT_DELETE, req);
+      
+      const userId = req.user._id;
+      const { conversationId } = req.params;
+
+      if (!conversationId) {
+        const errorResponse = {
+          success: false,
+          message: 'Conversation ID is required'
+        };
+        logResponse(ENDPOINT_DELETE, errorResponse);
+        return res.status(400).json(errorResponse);
+      }
+      
+      // Debug: Log delete operation
+      logRequest(`${ENDPOINT_DELETE}/db-delete`, {
+        userId,
+        conversationId
+      });
+
+      // First, count messages to be deleted for debugging
+      const messageCount = await Chat.countDocuments({ userId, conversationId });
+      
+      // Debug: Log message count
+      logResponse(`${ENDPOINT_DELETE}/message-count`, {
+        conversationId,
+        messageCount
+      });
+      
+      // Perform deletion
+      const deleteResult = await Chat.deleteMany({ userId, conversationId });
+      
+      // Debug: Log deletion result
+      logResponse(`${ENDPOINT_DELETE}/db-delete`, {
+        conversationId,
+        deletedCount: deleteResult.deletedCount,
+        acknowledged: deleteResult.acknowledged
+      });
+
+      const successResponse = {
+        success: true,
+        message: 'Conversation deleted successfully',
+        data: {
+          conversationId,
+          deletedCount: deleteResult.deletedCount
+        }
+      };
+      
+      // Debug: Log response
+      logResponse(ENDPOINT_DELETE, successResponse);
+      
+      res.json(successResponse);
+    } catch (error) {
+      console.error('Error in deleteConversation:', error);
+      
+      // Debug: Log error
+      logError(ENDPOINT_DELETE, error);
+      
+      const errorResponse = {
+        success: false,
+        message: error.message || 'Failed to delete conversation'
+      };
+      
+      res.status(500).json(errorResponse);
     }
   }
 };
 
-module.exports = chatController; 
+module.exports = chatController;

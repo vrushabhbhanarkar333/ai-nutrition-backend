@@ -1,98 +1,93 @@
-const axios = require('axios');
-const apiConfig = require('../config/api');
+const OpenAI = require('openai');
+const { logRequest, logResponse, logError } = require('../utils/debugLogger');
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+const ENDPOINT = 'api/ai/chat';
 
 const aiConversationController = {
   // Handle AI conversation
   conversationChat: async (req, res) => {
     try {
+      // Debug: Log request
+      logRequest(ENDPOINT, req);
+      
       const { message, context } = req.body;
       const userId = req.user._id;
 
       if (!message) {
-        return res.status(400).json({
+        const errorResponse = {
           success: false,
-          error: 'Message is required'
-        });
+          error: 'Message is required',
+        };
+        logResponse(ENDPOINT, errorResponse);
+        return res.status(400).json(errorResponse);
       }
 
       console.log(`Processing AI conversation for user ${userId}: "${message}"`);
 
-
       let prompt = "You are a nutrition and exercise coach. Your entire response must be in 2-3 short paragraphs with no special characters. Never use asterisks, bullet points, dashes or any symbols. Do not format text in any way. Keep total response under 100 words. Provide only the most essential advice in plain conversational sentences. Answer the user's question directly in brief paragraphs.";
 
-// Add context if provided
-if (context && context.length > 0) {
-  prompt += "Based on our previous conversation: " + context.join(" ") + ". ";
-}
-
-// Add the user's message
-prompt += `User question: ${message}`;
-
-      // Call Gemini API for conversation
-      console.log('Calling Gemini API for conversation...');
-      const geminiResponse = await axios.post(
-        `${apiConfig.gemini.endpoint}?key=${apiConfig.gemini.apiKey}`,
-        {
-          contents: [{
-            parts: [{
-              text: prompt
-            }]
-          }]
-        }
-      );
-
-      console.log('Gemini API response received');
-
-      if (!geminiResponse.data.candidates || !geminiResponse.data.candidates[0]) {
-        throw new Error('No response generated from AI');
+      if (context && context.length > 0) {
+        prompt += " Based on our previous conversation: " + context.join(" ") + ". ";
       }
 
-      // Extract AI response
-      let aiResponse = geminiResponse.data.candidates[0].content.parts[0].text;
+      prompt += ` User question: ${message}`;
+
+      console.log('Calling OpenAI API for conversation...');
       
-      // Clean up the response - remove any special characters or formatting
-      aiResponse = aiResponse
-        .replace(/\*/g, '') // Remove asterisks
-        .replace(/\n+/g, ' ') // Replace multiple newlines with a single space
-        .replace(/\s{2,}/g, ' ') // Replace multiple spaces with a single space
-        .replace(/^[^a-zA-Z0-9]+/, '') // Remove non-alphanumeric characters at the start
-        .replace(/[^\w\s.,!?:]/g, '') // Remove any remaining special characters except basic punctuation
-        .trim(); // Trim whitespace
+      // Debug: Log OpenAI request
+      logRequest(`${ENDPOINT}/openai`, { model: 'text-davinci-003', prompt, max_tokens: 150 });
       
-      // Make sure the response starts with "Coach:" if it doesn't already
+      const response = await openai.completions.create({
+        model: 'text-davinci-003',
+        prompt,
+        max_tokens: 150,
+      });
+
+      // Debug: Log OpenAI response (truncated for brevity)
+      logResponse(`${ENDPOINT}/openai`, { 
+        model: response.model,
+        choices: response.choices.map(c => ({ text: c.text.substring(0, 50) + '...' })),
+        usage: response.usage
+      });
+
+      let aiResponse = response.choices[0].text.trim();
+
       if (!aiResponse.startsWith('Coach:')) {
         aiResponse = 'Coach: ' + aiResponse;
       }
-      
-      // Enforce character limit (approximately 150 characters for 2-3 short sentences)
-      if (aiResponse.length > 150) {
-        // Find the last sentence end within the limit
-        const lastSentenceEnd = aiResponse.substring(0, 150).lastIndexOf('.');
-        if (lastSentenceEnd > 50) {
-          aiResponse = aiResponse.substring(0, lastSentenceEnd + 1);
-        } else {
-          // If no sentence end found, just truncate
-          aiResponse = aiResponse.substring(0, 150);
-        }
-      }
-      
+
       console.log(`AI response: "${aiResponse}"`);
 
-      res.json({
+      const successResponse = {
         success: true,
         data: {
           message: aiResponse,
-          timestamp: new Date().toISOString()
-        }
-      });
+          timestamp: new Date().toISOString(),
+        },
+      };
+      
+      // Debug: Log response
+      logResponse(ENDPOINT, successResponse);
+      
+      res.json(successResponse);
     } catch (error) {
       console.error('Error in AI conversation:', error);
-      res.status(500).json({
+      
+      // Debug: Log error
+      logError(ENDPOINT, error);
+      
+      const errorResponse = {
         success: false,
-        error: error.message || 'Failed to process AI conversation'
-      });
+        error: error.message || 'Failed to process AI conversation',
+      };
+      
+      res.status(500).json(errorResponse);
     }
-  }
+  },
 };
 
 module.exports = aiConversationController;

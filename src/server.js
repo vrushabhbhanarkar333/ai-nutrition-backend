@@ -2,6 +2,7 @@ require('dotenv').config();
 const app = require('./app');
 const mongoose = require('mongoose');
 const connectDB = require('./config/database');
+const { initNotificationSchedules } = require('./services/notificationService');
 
 const verifyDBConnection = async () => {
   try {
@@ -22,7 +23,11 @@ const verifyDBConnection = async () => {
   }
 };
 
-const PORT = process.env.PORT || 3000;
+let PORT = parseInt(process.env.PORT || '3000', 10);
+if (isNaN(PORT) || PORT < 0 || PORT > 65535) {
+  console.error('Invalid port specified. Using default port 3000');
+  PORT = 3000;
+}
 
 const findAvailablePort = async (port) => {
   const net = require('net');
@@ -46,6 +51,9 @@ const startServer = async () => {
     const server = app.listen(availablePort, () => {
       console.log(`Server is running on port ${availablePort}`);
       console.log(`API URL: http://localhost:${availablePort}/api`);
+      
+      // Initialize notification schedules
+      initNotificationSchedules();
     });
 
     server.on('error', (error) => {

@@ -294,7 +294,170 @@ Authorization: Bearer <token>
 
 The token is obtained by logging in with the user's credentials.
 
-##on Endpoint
+## User Profile Endpoints
+
+### 1. Check if Profile Exists
+
+Checks if a user profile has been created.
+
+**Endpoint:** `GET /api/profile/exists`
+
+**Authentication:** Required (Bearer Token)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "profileExists": true,
+    "userId": "60d21b4667d0d8992e610c85"
+  }
+}
+```
+
+### 2. Create Profile
+
+Creates a new user profile with health and fitness information.
+
+**Endpoint:** `POST /api/profile`
+
+**Authentication:** Required (Bearer Token)
+
+**Request:**
+- Content-Type: `application/json`
+- Body:
+```json
+{
+  "height": 175,
+  "weight": 70,
+  "fitness_goal": "lose_weight",
+  "activity_level": "moderate",
+  "age": 30,
+  "gender": "male",
+  "dietary_restrictions": ["vegetarian", "no_dairy"]
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "60d21b4667d0d8992e610c85",
+    "username": "johndoe",
+    "email": "john@example.com",
+    "name": "John Doe",
+    "height": 175,
+    "weight": 70,
+    "fitness_goal": "lose_weight",
+    "activity_level": "moderate",
+    "age": 30,
+    "gender": "male",
+    "dietary_restrictions": ["vegetarian", "no_dairy"],
+    "profile_picture": null,
+    "created_at": "2023-06-15T14:32:10.123Z",
+    "updated_at": "2023-06-15T14:32:10.123Z"
+  }
+}
+```
+
+### 3. Get Profile
+
+Retrieves the user's profile information.
+
+**Endpoint:** `GET /api/profile`
+
+**Authentication:** Required (Bearer Token)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "60d21b4667d0d8992e610c85",
+    "username": "johndoe",
+    "email": "john@example.com",
+    "name": "John Doe",
+    "height": 175,
+    "weight": 70,
+    "fitness_goal": "lose_weight",
+    "activity_level": "moderate",
+    "age": 30,
+    "gender": "male",
+    "dietary_restrictions": ["vegetarian", "no_dairy"],
+    "profile_picture": "uploads/profiles/profilePicture-1623766330123-123456789.jpg",
+    "created_at": "2023-06-15T14:32:10.123Z",
+    "updated_at": "2023-06-15T14:32:10.123Z"
+  }
+}
+```
+
+### 4. Update Profile
+
+Updates the user's profile information.
+
+**Endpoint:** `PUT /api/profile`
+
+**Authentication:** Required (Bearer Token)
+
+**Request:**
+- Content-Type: `application/json`
+- Body:
+```json
+{
+  "height": 175,
+  "weight": 68,
+  "fitness_goal": "maintain",
+  "activity_level": "active"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "id": "60d21b4667d0d8992e610c85",
+    "username": "johndoe",
+    "email": "john@example.com",
+    "name": "John Doe",
+    "height": 175,
+    "weight": 68,
+    "fitness_goal": "maintain",
+    "activity_level": "active",
+    "age": 30,
+    "gender": "male",
+    "dietary_restrictions": ["vegetarian", "no_dairy"],
+    "profile_picture": "uploads/profiles/profilePicture-1623766330123-123456789.jpg",
+    "updated_at": "2023-06-16T10:15:30.456Z"
+  }
+}
+```
+
+### 5. Upload Profile Picture
+
+Uploads a profile picture for the user.
+
+**Endpoint:** `POST /api/profile/picture`
+
+**Authentication:** Required (Bearer Token)
+
+**Request:**
+- Content-Type: `multipart/form-data`
+- Body:
+  - `profilePicture`: Image file (JPEG, PNG)
+
+**Response:**
+```json
+{
+  "success": true,
+  "data": {
+    "profilePicture": "uploads/profiles/profilePicture-1623766330123-123456789.jpg"
+  }
+}
+```
+
+## AI Chat Endpoint
 
 ### AI Chat
 

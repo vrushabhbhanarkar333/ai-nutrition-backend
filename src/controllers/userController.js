@@ -206,13 +206,18 @@ const userController = {
 
   updateNotificationToken: async (req, res) => {
     try {
-      const { notificationToken } = req.body;
+      const { notificationToken, timezone } = req.body;
       const userId = req.user._id;
+
+      // Prepare update object
+      const updateData = {};
+      if (notificationToken !== undefined) updateData.notificationToken = notificationToken;
+      if (timezone !== undefined) updateData.timezone = timezone;
 
       // Find user and update
       const user = await User.findByIdAndUpdate(
         userId, 
-        { notificationToken }, 
+        updateData, 
         { new: true }
       );
       
@@ -223,16 +228,19 @@ const userController = {
         });
       }
 
-      console.log(`Notification token updated for user: ${user._id}`);
+      console.log(`Notification settings updated for user: ${user._id}`);
+      console.log(`Token: ${notificationToken ? 'Updated' : 'Not updated'}, Timezone: ${timezone || 'Not updated'}`);
 
       res.json({
         success: true,
         data: {
-          message: 'Notification token updated successfully'
+          message: 'Notification settings updated successfully',
+          notificationToken: user.notificationToken,
+          timezone: user.timezone
         }
       });
     } catch (error) {
-      console.error('Error updating notification token:', error);
+      console.error('Error updating notification settings:', error);
       res.status(500).json({
         success: false,
         error: error.message

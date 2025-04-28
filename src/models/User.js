@@ -32,7 +32,18 @@ const userSchema = new mongoose.Schema({
     default: 10000
   },
   notificationToken: {
-    type: String
+    type: String,
+    validate: {
+      validator: function(v) {
+        // Basic validation for Expo push tokens
+        return !v || v.startsWith('ExponentPushToken[') || v.startsWith('ExpoPushToken[');
+      },
+      message: props => `${props.value} is not a valid Expo push token!`
+    }
+  },
+  timezone: {
+    type: String,
+    default: 'UTC'
   },
   preferences: {
     dietaryRestrictions: [String],

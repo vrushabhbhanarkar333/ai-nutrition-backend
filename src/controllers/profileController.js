@@ -33,6 +33,28 @@ const upload = multer({
 });
 
 const profileController = {
+  // Check if user profile exists
+  checkProfileExists: async (req, res) => {
+    try {
+      const userId = req.user._id;
+      const profile = await Profile.findOne({ userId });
+      
+      res.json({
+        success: true,
+        data: {
+          profileExists: !!profile,
+          userId: userId
+        }
+      });
+    } catch (error) {
+      console.error('Error checking profile existence:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  },
+
   // Create new profile
   createProfile: async (req, res) => {
     try {
