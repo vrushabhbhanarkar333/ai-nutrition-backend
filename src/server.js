@@ -59,7 +59,13 @@ const startServer = async () => {
       // Initialize vector database tables
       try {
         console.log('Initializing vector database tables...');
-        initializeChatTable()
+        const { initializeVectorTable } = require('./services/embeddingService');
+        
+        // Initialize both tables
+        Promise.all([
+          initializeChatTable(),
+          initializeVectorTable()
+        ])
           .then(() => console.log('Vector database tables initialized successfully'))
           .catch(err => console.error('Error initializing vector database:', err));
       } catch (error) {

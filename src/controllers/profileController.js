@@ -1,24 +1,10 @@
 const Profile = require('../models/Profile');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
+const cloudinary = require('../config/cloudinary');
 
-// Configure multer for profile picture upload
-const storage = multer.diskStorage({
-  destination: function (req, file, cb) {
-    const uploadDir = 'uploads/profiles';
-    if (!fs.existsSync(uploadDir)) {
-      fs.mkdirSync(uploadDir, { recursive: true });
-    }
-    cb(null, uploadDir);
-  },
-  filename: function (req, file, cb) {
-    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
-  }
-});
-
-const upload = multer({ 
+// Configure multer for memory storage (for Cloudinary uploads)
+const storage = multer.memoryStorage();
+const upload = multer({
   storage: storage,
   limits: {
     fileSize: 5 * 1024 * 1024 // 5MB limit
@@ -76,7 +62,7 @@ const profileController = {
         });
       }
 
-      const userId = req.user._id; // Assuming user is authenticated
+      const userId = req.user._id;
 
       // Check if profile already exists
       const existingProfile = await Profile.findOne({ userId });
@@ -118,7 +104,7 @@ const profileController = {
           age: profile.age,
           gender: profile.gender,
           dietary_restrictions: profile.dietary_restrictions,
-          profile_picture: profile.profilePicture,
+          profile_picture: profile.profilePicture?.url || null,
           created_at: profile.createdAt,
           updated_at: profile.updatedAt
         }
@@ -162,7 +148,7 @@ const profileController = {
           age: profile.age,
           gender: profile.gender,
           dietary_restrictions: profile.dietary_restrictions,
-          profile_picture: profile.profilePicture,
+          profile_picture: profile.profilePicture?.url || null,
           created_at: profile.createdAt,
           updated_at: profile.updatedAt
         }
@@ -190,17 +176,17 @@ const profileController = {
         });
       }
 
-      // Check if required fields are present for creating a new profile
-      if (!updates.height || !updates.weight || !updates.fitness_goal || !updates.activity_level) {
-        return res.status(400).json({
-          success: false,
-          error: 'Missing required fields: height, weight, fitness_goal, and activity_level are required to create a profile'
-        });
-      }
-
       // Find profile or create a new one if it doesn't exist
       let profile = await Profile.findOne({ userId });
       if (!profile) {
+        // Check if required fields are present for creating a new profile
+        if (!updates.height || !updates.weight || !updates.fitness_goal || !updates.activity_level) {
+          return res.status(400).json({
+            success: false,
+            error: 'Missing required fields: height, weight, fitness_goal, and activity_level are required to create a profile'
+          });
+        }
+
         console.log('Profile not found, creating a new one');
         profile = new Profile({
           userId,
@@ -210,7 +196,7 @@ const profileController = {
         // Update fields
         const allowedFields = [
           'height', 'weight', 'fitness_goal', 'activity_level', 
-          'age', 'gender', 'dietary_restrictions', 'name'
+          'age', 'gender', 'dietary_restrictions'
         ];
         
         allowedFields.forEach(field => {
@@ -239,7 +225,7 @@ const profileController = {
           age: profile.age,
           gender: profile.gender,
           dietary_restrictions: profile.dietary_restrictions,
-          profile_picture: profile.profilePicture,
+          profile_picture: profile.profilePicture?.url || null,
           updated_at: profile.updatedAt
         }
       });
@@ -272,22 +258,33 @@ const profileController = {
         });
       }
 
-      // Delete old profile picture if exists
-      if (profile.profilePicture) {
-        const oldPicturePath = path.join(__dirname, '..', profile.profilePicture);
-        if (fs.existsSync(oldPicturePath)) {
-          fs.unlinkSync(oldPicturePath);
-        }
+      // Delete old image from Cloudinary if exists
+      if (profile.profilePicture?.publicId) {
+        await cloudinary.uploader.destroy(profile.profilePicture.publicId);
       }
 
-      // Update profile with new picture path
-      profile.profilePicture = req.file.path;
+      // Convert buffer to base64 for Cloudinary upload
+      const b64 = Buffer.from(req.file.buffer).toString('base64');
+      const dataURI = 'data:' + req.file.mimetype + ';base64,' + b64;
+
+      // Upload to Cloudinary
+      const uploadResult = await cloudinary.uploader.upload(dataURI, {
+        folder: 'profile_pictures',
+        resource_type: 'auto'
+      });
+
+      // Update profile with new picture URL and public ID
+      profile.profilePicture = {
+        url: uploadResult.secure_url,
+        publicId: uploadResult.public_id
+      };
+
       await profile.save();
 
       res.json({
         success: true,
         data: {
-          profilePicture: profile.profilePicture
+          profile_picture: profile.profilePicture.url
         }
       });
     } catch (error) {
@@ -301,5 +298,3 @@ const profileController = {
 };
 
 module.exports = { profileController, upload };
-
-module.exports = { profileController, upload }; 

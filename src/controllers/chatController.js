@@ -4,6 +4,7 @@ const multer = require('multer');
 const { v4: uuidv4 } = require('uuid');
 const path = require('path');
 const { logRequest, logResponse, logError } = require('../utils/debugLogger');
+const { processMessageEmbedding } = require('../services/embeddingService');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -89,9 +90,34 @@ const chatController = {
           parentMessageId,
           message,
           imageUrl: req.file ? `/uploads/chat-images/${req.file.filename}` : null,
-          isAI: false
+          isAI: false,
+          isEmbedded: false // Mark for embedding processing
         });
         await userMessage.save();
+        
+        // Process embedding for user message in the background
+        console.log(`Starting embedding process for user message ${userMessage._id}...`);
+        // Use setTimeout to ensure this runs after the response is sent
+        setTimeout(() => {
+          processMessageEmbedding(
+            userId.toString(), 
+            currentConversationId, 
+            userMessage._id.toString(), 
+            message, 
+            false
+          )
+            .then(success => {
+              if (success) {
+                console.log(`Successfully processed embedding for user message ${userMessage._id}`);
+                // Update the message to mark it as embedded
+                Chat.findByIdAndUpdate(userMessage._id, { isEmbedded: true })
+                  .catch(err => console.error(`Error updating isEmbedded flag for message ${userMessage._id}:`, err));
+              } else {
+                console.error(`Failed to process embedding for user message ${userMessage._id}`);
+              }
+            })
+            .catch(err => console.error(`Error processing user message embedding for ${userMessage._id}:`, err));
+        }, 100);
         
         // Debug: Log saved user message
         logResponse(`${ENDPOINT_SEND}/user-message`, {
@@ -123,15 +149,48 @@ const chatController = {
             hasImageAnalysis: !!response.imageAnalysis
           });
 
+          // Clean response of any markdown formatting that might have slipped through
+          let cleanedResponse = response.message
+            .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold formatting
+            .replace(/\*(.*?)\*/g, '$1')     // Remove italic formatting
+            .replace(/^#+\s+/gm, '')         // Remove heading markers
+            .replace(/^[-*+]\s+/gm, '')      // Remove bullet points
+            .replace(/`([^`]+)`/g, '$1');    // Remove code formatting
+
           // Save AI response
           const aiMessage = new Chat({
             userId,
             conversationId: currentConversationId,
             parentMessageId: userMessage._id.toString(),
-            message: response.message,
-            isAI: true
+            message: cleanedResponse,
+            isAI: true,
+            isEmbedded: false // Mark for embedding processing
           });
           await aiMessage.save();
+          
+          // Process embedding for AI message in the background
+          console.log(`Starting embedding process for AI message ${aiMessage._id}...`);
+          // Use setTimeout to ensure this runs after the response is sent
+          setTimeout(() => {
+            processMessageEmbedding(
+              userId.toString(), 
+              currentConversationId, 
+              aiMessage._id.toString(), 
+              cleanedResponse, 
+              true
+            )
+              .then(success => {
+                if (success) {
+                  console.log(`Successfully processed embedding for AI message ${aiMessage._id}`);
+                  // Update the message to mark it as embedded
+                  Chat.findByIdAndUpdate(aiMessage._id, { isEmbedded: true })
+                    .catch(err => console.error(`Error updating isEmbedded flag for message ${aiMessage._id}:`, err));
+                } else {
+                  console.error(`Failed to process embedding for AI message ${aiMessage._id}`);
+                }
+              })
+              .catch(err => console.error(`Error processing AI message embedding for ${aiMessage._id}:`, err));
+          }, 100);
           
           // Debug: Log saved AI message
           logResponse(`${ENDPOINT_SEND}/ai-message`, {
@@ -244,10 +303,24 @@ const chatController = {
         sort: { createdAt: -1 }
       });
 
-      const messages = await Chat.find(query)
-        .sort({ createdAt: -1 })
-        .limit(parseInt(limit))
-        .lean();
+      // First get the list of conversation IDs
+      const conversationIds = await Chat.distinct('conversationId', query);
+      
+      // Then get messages for each conversation, sorted chronologically
+      let messages = [];
+      for (const convId of conversationIds) {
+        const convMessages = await Chat.find({ ...query, conversationId: convId })
+          .sort({ createdAt: 1 }) // Sort chronologically (oldest first) for proper conversation flow
+          .limit(parseInt(limit))
+          .lean();
+        
+        messages = [...messages, ...convMessages];
+      }
+      
+      // If we have too many messages, trim to the limit
+      if (messages.length > parseInt(limit)) {
+        messages = messages.slice(0, parseInt(limit));
+      }
         
       // Debug: Log query results
       logResponse(`${ENDPOINT_HISTORY}/db-query`, {
@@ -289,7 +362,7 @@ const chatController = {
         data: {
           conversations: Object.entries(conversations).map(([id, messages]) => ({
             id,
-            messages: messages.reverse()
+            messages: messages // Already in chronological order, no need to reverse
           }))
         }
       };

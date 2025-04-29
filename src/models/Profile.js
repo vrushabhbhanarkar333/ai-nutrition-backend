@@ -46,8 +46,14 @@ const profileSchema = new mongoose.Schema({
     default: []
   },
   profilePicture: {
-    type: String,
-    default: null
+    url: {
+      type: String,
+      default: null
+    },
+    publicId: {
+      type: String,
+      default: null
+    }
   },
   createdAt: {
     type: Date,
@@ -73,4 +79,4 @@ profileSchema.pre('save', function(next) {
   next();
 });
 
-module.exports = mongoose.model('Profile', profileSchema); 
+module.exports = mongoose.model('Profile', profileSchema);

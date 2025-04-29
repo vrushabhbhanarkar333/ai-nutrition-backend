@@ -23,6 +23,21 @@ const authMiddleware = {
       return res.status(403).json({ success: false, message: 'Invalid or expired token' });
     }
   },
+  
+  isAdmin: (req, res, next) => {
+    // Check if user is authenticated
+    if (!req.user) {
+      return res.status(401).json({ success: false, message: 'Authentication required' });
+    }
+    
+    // Check if user has admin role
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Admin access required' });
+    }
+    
+    // User is an admin, proceed
+    next();
+  },
 
   validateRegisterInput: (req, res, next) => {
     const { username, email, password } = req.body;
