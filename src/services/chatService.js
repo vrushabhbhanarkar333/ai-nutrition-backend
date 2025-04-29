@@ -2,8 +2,10 @@ const { createClient } = require('@clickhouse/client');
 const OpenAI = require('openai');
 const Chat = require('../models/Chat');
 const fs = require('fs');
+const path = require('path');
 const { logRequest, logResponse, logError } = require('../utils/debugLogger');
 const { findSimilarMessages } = require('./embeddingService');
+const foodService = require('./foodService');
 
 // Initialize ClickHouse client
 const client = createClient({
@@ -111,10 +113,11 @@ const chatService = {
         }
       });
       
-      // System prompt that defines the AI's behavior
-      const systemPrompt = "You are an AI assistant specialized in nutrition and fitness. Provide detailed, informative, and supportive responses to users' questions. When relevant information from the user's previous conversations is provided, reference it naturally in your response to personalize your advice. Analyze food images when provided and offer insights about nutritional content, ingredients, and possible healthier alternatives. Give practical and easy-to-follow fitness advice suitable for beginners and advanced users. Always maintain a friendly, conversational, and positive tone. Responses must be clear, natural, and easy to understand without using any special characters like * or # or formatting symbols. Each response should be between 100 and 500 words, offering valuable and actionable information that helps users improve their nutrition and fitness journey.";
+      // System prompt that defines the AI's behavior - simplified for faster responses
+      const systemPrompt = "You are a nutrition and fitness assistant. Keep responses brief and helpful. When food analysis data is provided, include it in your response. Reference previous conversations when relevant. Be friendly and conversational. Avoid special formatting characters. Provide practical advice that helps users improve their nutrition and fitness.";
       
       let imageContent = '';
+      let foodAnalysisResult = null;
       // Initialize messages array with system message
       const messages = [
         {
@@ -125,61 +128,133 @@ const chatService = {
 
       // If there's an image, analyze it first
       if (options.imageUrl) {
+        console.log('\n==== IMAGE ANALYSIS ATTEMPT ====');
+        console.log('Image URL:', options.imageUrl);
         try {
           // Debug: Log image processing
           logRequest(`${ENDPOINT_SERVICE}/image-analysis`, {
             imagePath: options.imageUrl
           });
           
-          const imagePath = '.' + options.imageUrl;
+          // Handle both relative and absolute paths
+          let imagePath;
+          
+          // If the path is already absolute, use it directly
+          if (options.imageUrl.startsWith('/') || options.imageUrl.includes(':/')) {
+            imagePath = options.imageUrl;
+          } else {
+            // Otherwise, construct the path based on environment
+            if (process.env.NODE_ENV === 'production') {
+              // In production, use path relative to the root directory
+              imagePath = path.join(process.cwd(), options.imageUrl);
+            } else {
+              // In development, use the absolute path
+              imagePath = path.join('d:/freelance_project/ai-nutrition-backend', options.imageUrl);
+            }
+          }
+          
+          console.log(`Reading image file from: ${imagePath}`);
+          
+          // Check if file exists
+          if (!fs.existsSync(imagePath)) {
+            console.error(`Image file does not exist at path: ${imagePath}`);
+            console.log('Trying alternative path...');
+            
+            // Try an alternative path
+            const altPath = path.join(process.cwd(), options.imageUrl.replace(/^\//, ''));
+            console.log(`Trying alternative path: ${altPath}`);
+            
+            if (fs.existsSync(altPath)) {
+              imagePath = altPath;
+              console.log(`Found image at alternative path: ${imagePath}`);
+            } else {
+              throw new Error('Image file not found');
+            }
+          }
+          
           const imageBuffer = fs.readFileSync(imagePath);
-          const base64Image = imageBuffer.toString('base64');
+          console.log(`Image buffer size: ${imageBuffer.length} bytes`);
           
-          // Debug: Log OpenAI Vision API call
-          logRequest(`${ENDPOINT_SERVICE}/vision-api`, {
-            model: "gpt-4-vision-preview",
-            imageSize: Math.round(base64Image.length / 1024) + 'KB'
-          });
+          // Use the food service to analyze the image
+          console.log('Calling food service to analyze image...');
+          try {
+            foodAnalysisResult = await foodService.analyzeFood(imageBuffer);
+            console.log('Food analysis result:', JSON.stringify(foodAnalysisResult));
+          } catch (foodError) {
+            console.error('Error in food analysis:', foodError);
+            // We'll continue with the Vision API below
+          }
+          
+          if (foodAnalysisResult && !foodAnalysisResult.error) {
+            // Format the food analysis result into a readable message
+            const foodItems = foodAnalysisResult.foodItems;
+            let analysisText = "I've analyzed your food image and identified the following items:\n\n";
+            
+            foodItems.forEach(item => {
+              analysisText += `${item.name}: ${item.calories} calories per 100g. `;
+              analysisText += `Contains ${item.protein}g protein, ${item.carbs}g carbs, ${item.fat}g fat, and ${item.fiber}g fiber. `;
+              analysisText += `This food is generally considered ${item.isHealthy ? 'healthy' : 'less healthy'}.\n\n`;
+            });
+            
+            analysisText += `Total estimated calories: ${foodAnalysisResult.totalCalories}`;
+            
+            imageContent = analysisText;
+          } else {
+            // Fall back to Vision API
+            console.log('Food analysis failed or returned an error, falling back to Vision API');
+            const base64Image = imageBuffer.toString('base64');
+            
+            // Debug: Log OpenAI Vision API call
+            logRequest(`${ENDPOINT_SERVICE}/vision-api`, {
+              model: "gpt-4-vision-preview",
+              imageSize: Math.round(base64Image.length / 1024) + 'KB'
+            });
 
-          // Get image description from OpenAI Vision API
-          const visionResponse = await openai.chat.completions.create({
-            model: "gpt-4-vision-preview",
-            messages: [
-              {
-                role: "user",
-                content: [
-                  {
-                    type: "text",
-                    text: "Analyze this food image and describe what you see in terms of nutritional content:"
-                  },
-                  {
-                    type: "image_url",
-                    image_url: {
-                      url: `data:image/jpeg;base64,${base64Image}`
+            // Get image description from OpenAI Vision API
+            const visionResponse = await openai.chat.completions.create({
+              model: "gpt-4-vision-preview",
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    {
+                      type: "text",
+                      text: "Analyze this food image in detail. Describe what you see, identify the foods, estimate nutritional content, and suggest any health considerations. Be thorough in your analysis."
+                    },
+                    {
+                      type: "image_url",
+                      image_url: {
+                        url: `data:image/jpeg;base64,${base64Image}`
+                      }
                     }
-                  }
-                ]
-              }
-            ],
-            max_tokens: 150
-          });
-          
-          // Debug: Log Vision API response
-          logResponse(`${ENDPOINT_SERVICE}/vision-api`, {
-            responseLength: visionResponse.choices[0].message.content.length,
-            preview: visionResponse.choices[0].message.content.substring(0, 50) + '...',
-            usage: visionResponse.usage
-          });
+                  ]
+                }
+              ],
+              max_tokens: 500
+            });
+            
+            // Debug: Log Vision API response
+            logResponse(`${ENDPOINT_SERVICE}/vision-api`, {
+              responseLength: visionResponse.choices[0].message.content.length,
+              preview: visionResponse.choices[0].message.content.substring(0, 50) + '...',
+              usage: visionResponse.usage
+            });
 
-          imageContent = visionResponse.choices[0].message.content;
+            imageContent = visionResponse.choices[0].message.content;
+          }
           
-          // Add image analysis as an assistant message
+          console.log(`Image analysis: ${imageContent.substring(0, 100)}...`);
+          
+          // Add image analysis as a system message
           messages.push({
-            role: "assistant",
-            content: `I've analyzed your food image. ${imageContent}`
+            role: "system",
+            content: `I've analyzed the image the user shared. Here's what I can see: ${imageContent}`
           });
+          
+          // Don't add a direct assistant message about the image - we'll let the model generate a complete response
         } catch (imageError) {
           // Debug: Log image processing error
+          console.error('Error processing image:', imageError);
           logError(`${ENDPOINT_SERVICE}/image-analysis`, imageError);
           
           // Continue without image analysis
@@ -280,11 +355,27 @@ const chatService = {
         logError(`${ENDPOINT_SERVICE}/vector-search`, vectorError);
       }
       
-      // Add the current user message
-      messages.push({
-        role: "user",
-        content: message
-      });
+      // Add the current user message, including reference to the image if one was uploaded
+      if (options.imageUrl) {
+        messages.push({
+          role: "user",
+          content: `${message} (I've also shared an image for you to analyze)`
+        });
+      } else {
+        messages.push({
+          role: "user",
+          content: message
+        });
+      }
+      
+      // If we have food analysis, make sure it's prominently included in the system message
+      if (foodAnalysisResult && !foodAnalysisResult.error) {
+        // Add a specific system message about the food analysis
+        messages.push({
+          role: "system",
+          content: `IMPORTANT: The user has shared an image of food. Your analysis MUST include the following nutritional information: ${JSON.stringify(foodAnalysisResult, null, 2)}`
+        });
+      }
       
       // Debug: Log messages array
       logRequest(`${ENDPOINT_SERVICE}/openai-completion`, {
@@ -293,9 +384,9 @@ const chatService = {
         preview: JSON.stringify(messages).substring(0, 100) + '...'
       });
 
-      // Get AI response with proper conversation context
+      // Get AI response with proper conversation context - use faster model for better UX
       const response = await openai.chat.completions.create({
-        model: "gpt-4-turbo-preview",
+        model: "gpt-3.5-turbo", // Use faster model for quicker responses
         messages: messages,
         max_tokens: 500,
         temperature: 0.7
@@ -318,17 +409,39 @@ const chatService = {
         .replace(/^#+\s+/gm, '')         // Remove heading markers
         .replace(/^[-*+]\s+/gm, '• ')    // Replace bullet points with a simple bullet
         .replace(/`([^`]+)`/g, '$1');    // Remove code formatting
+      
+      // If we have food analysis, include it in the response
+      if (foodAnalysisResult && !foodAnalysisResult.error) {
+        // Generate a food analysis response
+        let foodAnalysis = `I've analyzed your food image and identified the following:\n\n`;
+        
+        foodAnalysisResult.foodItems.forEach(item => {
+          foodAnalysis += `• ${item.name}: ${item.calories} calories per 100g serving\n`;
+          foodAnalysis += `  - Protein: ${item.protein}g\n`;
+          foodAnalysis += `  - Carbs: ${item.carbs}g\n`;
+          foodAnalysis += `  - Fat: ${item.fat}g\n`;
+          foodAnalysis += `  - Fiber: ${item.fiber}g\n`;
+          foodAnalysis += `  - Health assessment: ${item.isHealthy ? 'Healthy choice' : 'Less healthy option'}\n\n`;
+        });
+        
+        foodAnalysis += `Total estimated calories: ${foodAnalysisResult.totalCalories}\n\n`;
+        
+        // Combine AI response with food analysis
+        cleanedResponse = foodAnalysis + cleanedResponse;
+      }
 
       const result = {
         message: cleanedResponse,
-        imageAnalysis: imageContent || null
+        imageAnalysis: imageContent || null,
+        foodAnalysis: foodAnalysisResult || null
       };
       
       // Debug: Log final result
       logResponse(ENDPOINT_SERVICE, {
         messageLength: result.message.length,
         hasImageAnalysis: !!result.imageAnalysis,
-        imageAnalysisLength: result.imageAnalysis ? result.imageAnalysis.length : 0
+        imageAnalysisLength: result.imageAnalysis ? result.imageAnalysis.length : 0,
+        hasFoodAnalysis: !!result.foodAnalysis
       });
       
       return result;

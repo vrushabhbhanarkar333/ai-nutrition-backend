@@ -8,10 +8,15 @@ const { processMessageEmbedding } = require('../services/embeddingService');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    cb(null, 'uploads/chat-images');
+    // Use absolute path to ensure files are saved in the correct location
+    const uploadPath = path.join('d:/freelance_project/ai-nutrition-backend/uploads/chat-images');
+    console.log('Upload destination path:', uploadPath);
+    cb(null, uploadPath);
   },
   filename: (req, file, cb) => {
-    cb(null, Date.now() + path.extname(file.originalname));
+    const filename = Date.now() + '-' + Math.round(Math.random() * 1E9) + path.extname(file.originalname);
+    console.log('Generated filename:', filename);
+    cb(null, filename);
   }
 });
 
@@ -33,6 +38,19 @@ const chatController = {
     try {
       upload(req, res, async (err) => {
         // Debug: Log initial request (before multer processing)
+        console.log('\n==== CHAT MESSAGE REQUEST ====');
+        console.log('Request body:', req.body);
+        console.log('Request file:', req.file ? {
+          filename: req.file.filename,
+          originalname: req.file.originalname,
+          mimetype: req.file.mimetype,
+          size: req.file.size,
+          path: req.file.path,
+          destination: req.file.destination
+        } : 'No file uploaded');
+        console.log('User:', req.user ? { id: req.user._id } : 'No user');
+        console.log('============================\n');
+        
         logRequest(ENDPOINT_SEND, {
           body: req.body,
           file: req.file ? { 
@@ -146,7 +164,9 @@ const chatController = {
           // Debug: Log AI processing response
           logResponse(`${ENDPOINT_SEND}/ai-process`, {
             messageLength: response.message.length,
-            hasImageAnalysis: !!response.imageAnalysis
+            hasImageAnalysis: !!response.imageAnalysis,
+            hasFoodAnalysis: !!response.foodAnalysis,
+            foodAnalysisItems: response.foodAnalysis ? response.foodAnalysis.foodItems.length : 0
           });
 
           // Clean response of any markdown formatting that might have slipped through
@@ -215,6 +235,8 @@ const chatController = {
                   id: aiMessage._id,
                   message: aiMessage.message,
                   isAI: true,
+                  imageAnalysis: response.imageAnalysis,
+                  foodAnalysis: response.foodAnalysis,
                   timestamp: aiMessage.createdAt
                 }
               ]
@@ -223,6 +245,15 @@ const chatController = {
           
           // Debug: Log final response
           logResponse(ENDPOINT_SEND, successResponse);
+          
+          // Print detailed AI response for debugging
+          console.log('\n==== AI CHAT RESPONSE ====');
+          console.log('Endpoint:', ENDPOINT_SEND);
+          console.log('User Message:', message);
+          console.log('AI Response:', aiMessage.message);
+          console.log('Image Analysis:', response.imageAnalysis ? 'Present' : 'None');
+          console.log('Food Analysis:', response.foodAnalysis ? JSON.stringify(response.foodAnalysis, null, 2) : 'None');
+          console.log('========================\n');
           
           res.json(successResponse);
         } catch (aiError) {
