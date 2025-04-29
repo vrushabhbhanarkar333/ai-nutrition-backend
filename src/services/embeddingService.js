@@ -12,7 +12,7 @@ const client = createClient({
   url: 'https://jxp4673roi.westus3.azure.clickhouse.cloud:8443',
   username: 'default',
   password: '53mmu~hQwIZCY',
-  request_timeout: 30000, // Increase timeout to 30 seconds
+  request_timeout: 40000, // Increase timeout to 30 seconds
   compression: {
     request: true,
     response: true

@@ -30,12 +30,10 @@ if (isNaN(PORT) || PORT < 0 || PORT > 65535) {
   PORT = 3000;
 }
 
-// Use a fixed port for consistency with mobile app
-const PORT_FOR_MOBILE = 3001;
-
 const findAvailablePort = async (port) => {
-  // Always use PORT_FOR_MOBILE for consistency with mobile app
-  return PORT_FOR_MOBILE;
+  // Always use port 3000 as specified
+  console.log(`Using port ${port} as specified in .env file`);
+  return port;
 };
 
 const startServer = async () => {
@@ -110,8 +108,9 @@ const startServer = async () => {
 
     server.on('error', (error) => {
       if (error.code === 'EADDRINUSE') {
-        console.log(`Port ${availablePort} is in use, trying next port...`);
-        startServer();
+        console.error(`Port ${availablePort} is already in use. Please free up port ${availablePort} and try again.`);
+        console.error(`You can free up the port by closing other applications or by running: taskkill /F /IM node.exe`);
+        process.exit(1); // Exit with error code
       } else {
         console.error('Server error:', error);
       }
