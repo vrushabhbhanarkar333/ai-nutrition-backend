@@ -6,7 +6,7 @@ const client = createClient({
   url: 'https://jxp4673roi.westus3.azure.clickhouse.cloud:8443',
   username: 'default',
   password: '53mmu~hQwIZCY',
-  request_timeout: 30000,
+  request_timeout: 40000,
 });
 
 async function main() {
