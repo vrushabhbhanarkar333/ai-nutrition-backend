@@ -36,21 +36,23 @@ const mealController = {
         });
       }
       
-      // Calculate total nutrition values
-      const totalNutrition = {
+      // Use the saved totalNutrition if available, otherwise calculate it
+      let totalNutrition = meal.totalNutrition || {
         protein: 0,
         carbs: 0,
         fat: 0,
         fiber: 0
       };
       
-      // Sum up nutrition values from all food items
-      meal.foodItems.forEach(item => {
-        if (item.protein) totalNutrition.protein += item.protein;
-        if (item.carbs) totalNutrition.carbs += item.carbs;
-        if (item.fat) totalNutrition.fat += item.fat;
-        if (item.fiber) totalNutrition.fiber += item.fiber;
-      });
+      // If totalNutrition is not populated, calculate from food items
+      if (!totalNutrition.protein && !totalNutrition.carbs && !totalNutrition.fat && !totalNutrition.fiber) {
+        meal.foodItems.forEach(item => {
+          if (item.protein) totalNutrition.protein += Number(item.protein) || 0;
+          if (item.carbs) totalNutrition.carbs += Number(item.carbs) || 0;
+          if (item.fat) totalNutrition.fat += Number(item.fat) || 0;
+          if (item.fiber) totalNutrition.fiber += Number(item.fiber) || 0;
+        });
+      }
       
       res.json({
         success: true,

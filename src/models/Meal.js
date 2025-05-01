@@ -17,7 +17,7 @@ const mealSchema = new mongoose.Schema({
     },
     servingSize: {
       type: String,
-      required: true
+      default: '100g'
     },
     mealType: {
       type: String,
@@ -27,6 +27,23 @@ const mealSchema = new mongoose.Schema({
     isHealthy: {
       type: Boolean,
       default: false
+    },
+    // Add nutrition fields
+    protein: {
+      type: Number,
+      default: 0
+    },
+    carbs: {
+      type: Number,
+      default: 0
+    },
+    fat: {
+      type: Number,
+      default: 0
+    },
+    fiber: {
+      type: Number,
+      default: 0
     }
   }],
   totalCalories: {
@@ -43,15 +60,14 @@ const mealSchema = new mongoose.Schema({
     required: true
   },
   totalNutrition: {
-    calories: Number,
-    protein: Number,
-    carbs: Number,
-    fat: Number,
-    fiber: Number,
-  }
+    protein: { type: Number, default: 0 },
+    carbs: { type: Number, default: 0 },
+    fat: { type: Number, default: 0 },
+    fiber: { type: Number, default: 0 }
+  }  
 });
 
 // Create index for efficient querying
 mealSchema.index({ userId: 1, date: -1 });
 
-module.exports = mongoose.model('Meal', mealSchema); 
+module.exports = mongoose.model('Meal', mealSchema);
