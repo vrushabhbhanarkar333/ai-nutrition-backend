@@ -6,9 +6,6 @@ const auth = require('../middleware/auth');
 // Apply authentication middleware to all routes
 router.use(auth);
 
-// Add a new meal
-router.post('/', mealController.addMeal);
-
 // Get recent meals (last 7 days)
 router.get('/recent', mealController.getRecentMeals);
 
@@ -23,5 +20,9 @@ router.get('/history', mealController.getMealHistory);
 // Get calories by date range (weekly overview)
 // Example: /api/meals/range?startDate=2023-04-14&endDate=2023-04-20
 router.get('/range', mealController.getCaloriesByDateRange);
+
+// Get a single meal by ID
+// This route should be last to avoid conflicts with other routes
+router.get('/:id', mealController.getMealById);
 
 module.exports = router; 
