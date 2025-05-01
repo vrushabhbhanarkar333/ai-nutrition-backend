@@ -41,6 +41,13 @@ const mealSchema = new mongoose.Schema({
     type: String,
     enum: ['breakfast', 'lunch', 'dinner', 'snack'],
     required: true
+  },
+  totalNutrition: {
+    calories: Number,
+    protein: Number,
+    carbs: Number,
+    fat: Number,
+    fiber: Number,
   }
 });
 

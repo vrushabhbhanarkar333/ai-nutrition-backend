@@ -82,28 +82,51 @@ const foodController = {
       const validMealTypes = ['breakfast', 'lunch', 'dinner', 'snack'];
       const validatedMealType = validMealTypes.includes(mealType) ? mealType : 'snack';
       
-      // Validate food items meal types
+      // Validate food items meal types and ensure nutrition values are included
       const validatedFoodItems = foodItems.map(item => {
         // Make a copy of the item to avoid modifying the original
-        const validatedItem = { ...item };
+        const validatedItem = { 
+          ...item,
+          // Ensure nutrition values are included with defaults if missing
+          protein: item.protein || 0,
+          carbs: item.carbs || 0,
+          fat: item.fat || 0,
+          fiber: item.fiber || 0
+        };
         
         // Ensure mealType is valid
         if (!validMealTypes.includes(validatedItem.mealType)) {
           validatedItem.mealType = validatedMealType;
         }
         
+        // Log the item to verify nutrition values are included
+        console.log('Validated food item:', JSON.stringify(validatedItem));
+        
         return validatedItem;
       });
 
-      // Create a new meal entry
+      // Create a new meal entry with explicit nutrition values
+      const processedFoodItems = validatedFoodItems.map(item => ({
+        name: item.name,
+        calories: item.calories,
+        servingSize: item.servingSize || '100g',
+        mealType: item.mealType || validatedMealType,
+        isHealthy: item.isHealthy || false,
+        protein: Number(item.protein),
+        carbs: Number(item.carbs),
+        fat: Number(item.fat),
+        fiber: Number(item.fiber)
+      }));
+      
       const meal = new Meal({
         userId,
-        foodItems: validatedFoodItems,
-        totalCalories: totalCalories || validatedFoodItems.reduce((sum, item) => sum + item.calories, 0),
+        foodItems: processedFoodItems,
+        totalCalories: totalCalories || processedFoodItems.reduce((sum, item) => sum + item.calories, 0),
         mealType: validatedMealType,
         date: new Date()
       });
 
+      //meal.totalNutrition = totalNutrition;
       await meal.save();
       console.log(`Meal added for user ${userId}: ${meal.totalCalories} calories, type: ${validatedMealType}`);
 
@@ -135,19 +158,55 @@ const foodController = {
       await dailyCalorie.save();
       console.log(`Daily calorie updated for user ${userId}: ${dailyCalorie.totalCalories} calories`);
 
-      res.status(201).json({
+      // Calculate total nutrition values directly from the processed food items
+      const totalNutrition = processedFoodItems.reduce((totals, item) => {
+        return {
+          protein: totals.protein + (Number(item.protein) || 0),
+          carbs: totals.carbs + (Number(item.carbs) || 0),
+          fat: totals.fat + (Number(item.fat) || 0),
+          fiber: totals.fiber + (Number(item.fiber) || 0)
+        };
+      }, { protein: 0, carbs: 0, fat: 0, fiber: 0 });
+      
+      // Log the meal and nutrition values for debugging
+      console.log('Saved meal:', JSON.stringify(meal));
+      console.log('Total nutrition calculated:', JSON.stringify(totalNutrition));
+      
+      // Prepare the response with the exact structure requested
+      const response = {
         success: true,
         data: {
           meal: {
             id: meal._id,
-            foodItems: meal.foodItems,
+            foodItems: processedFoodItems.map(item => ({
+              name: item.name,
+              calories: item.calories,
+              servingSize: item.servingSize,
+              mealType: item.mealType,
+              isHealthy: item.isHealthy,
+              protein: Number(item.protein) || 0,
+              carbs: Number(item.carbs) || 0,
+              fat: Number(item.fat) || 0,
+              fiber: Number(item.fiber) || 0
+            })),
             totalCalories: meal.totalCalories,
+            totalNutrition: {
+              protein: parseFloat(totalNutrition.protein.toFixed(1)),
+              carbs: parseFloat(totalNutrition.carbs.toFixed(1)),
+              fat: parseFloat(totalNutrition.fat.toFixed(1)),
+              fiber: parseFloat(totalNutrition.fiber.toFixed(1))
+            },
             mealType: meal.mealType,
             date: meal.date
           },
           dailyCalories: dailyCalorie.totalCalories
         }
-      });
+      };
+      
+      // Log the final response for debugging
+      console.log('Response:', JSON.stringify(response));
+      
+      res.status(201).json(response);
     } catch (error) {
       console.error('Error adding analyzed food:', error);
       res.status(500).json({

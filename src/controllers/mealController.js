@@ -2,6 +2,87 @@ const Meal = require('../models/Meal');
 const User = require('../models/User');
 
 const mealController = {
+  // Get a single meal by ID
+  getMealById: async (req, res) => {
+    try {
+      const userId = req.user._id;
+      const mealId = req.params.id;
+      
+      if (!mealId) {
+        return res.status(400).json({
+          success: false,
+          error: 'Meal ID is required'
+        });
+      }
+      
+      const meal = await Meal.findOne({
+        _id: mealId,
+        userId
+      });
+      
+      if (!meal) {
+        return res.status(404).json({
+          success: false,
+          error: 'Meal not found'
+        });
+      }
+      
+      // Get user data for the response
+      const user = await User.findById(userId);
+      if (!user) {
+        return res.status(404).json({
+          success: false,
+          error: 'User not found'
+        });
+      }
+      
+      // Calculate total nutrition values
+      const totalNutrition = {
+        protein: 0,
+        carbs: 0,
+        fat: 0,
+        fiber: 0
+      };
+      
+      // Sum up nutrition values from all food items
+      meal.foodItems.forEach(item => {
+        if (item.protein) totalNutrition.protein += item.protein;
+        if (item.carbs) totalNutrition.carbs += item.carbs;
+        if (item.fat) totalNutrition.fat += item.fat;
+        if (item.fiber) totalNutrition.fiber += item.fiber;
+      });
+      
+      res.json({
+        success: true,
+        data: {
+          user: {
+            id: user._id,
+            username: user.username,
+            email: user.email
+          },
+          meal: {
+            id: meal._id,
+            foodItems: meal.foodItems,
+            totalCalories: meal.totalCalories,
+            totalNutrition: {
+              protein: parseFloat(totalNutrition.protein.toFixed(1)),
+              carbs: parseFloat(totalNutrition.carbs.toFixed(1)),
+              fat: parseFloat(totalNutrition.fat.toFixed(1)),
+              fiber: parseFloat(totalNutrition.fiber.toFixed(1))
+            },
+            mealType: meal.mealType,
+            date: meal.date
+          }
+        }
+      });
+    } catch (error) {
+      console.error('Error getting meal by ID:', error);
+      res.status(500).json({
+        success: false,
+        error: error.message
+      });
+    }
+  },
   // Add a new meal
   addMeal: async (req, res) => {
     try {
