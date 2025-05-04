@@ -3,6 +3,7 @@ const cron = require('node-cron');
 const User = require('../models/User');
 const DailyCalorie = require('../models/DailyCalorie');
 const Profile = require('../models/Profile');
+const { getRandomMessage } = require('./engagementService');
 
 // Initialize Expo SDK
 const expo = new Expo();
@@ -261,10 +262,78 @@ async function sendNotificationsForTimezone(timezone) {
 }
 
 /**
+ * Send engagement notifications to users in a specific timezone
+ * @param {String} timezone - The timezone to target
+ */
+async function sendEngagementNotificationsForTimezone(timezone) {
+  try {
+    console.log(`Sending engagement notifications for timezone: ${timezone}`);
+    
+    // Find users in this timezone with notification tokens
+    const users = await User.find({ 
+      timezone: timezone,
+      notificationToken: { $exists: true, $ne: null } 
+    });
+    
+    console.log(`Found ${users.length} users in timezone ${timezone}`);
+    
+    if (users.length === 0) return;
+    
+    // Get a random engagement message
+    const message = await getRandomMessage();
+    if (!message) {
+      console.log('No engagement message found');
+      return;
+    }
+    
+    console.log(`Selected engagement message: "${message.message}" (Category: ${message.category})`);
+    
+    // Prepare notifications
+    const notifications = [];
+    
+    for (const user of users) {
+      // Skip if invalid token
+      if (!Expo.isExpoPushToken(user.notificationToken)) {
+        continue;
+      }
+      
+      // Add to notifications batch
+      notifications.push({
+        to: user.notificationToken,
+        sound: 'default',
+        title: 'Nutrition Coach',
+        body: message.message,
+        data: { 
+          type: 'engagement',
+          messageId: message._id.toString(),
+          category: message.category
+        },
+      });
+      
+      console.log(`Prepared engagement notification for user ${user._id}`);
+    }
+    
+    // Send notifications in chunks (Expo recommends max 100 per batch)
+    const chunks = expo.chunkPushNotifications(notifications);
+    
+    for (const chunk of chunks) {
+      try {
+        const ticketChunk = await expo.sendPushNotificationsAsync(chunk);
+        console.log(`Sent ${chunk.length} engagement notifications for timezone ${timezone}`);
+      } catch (error) {
+        console.error(`Error sending engagement notifications for timezone ${timezone}:`, error);
+      }
+    }
+  } catch (error) {
+    console.error(`Error processing engagement notifications for timezone ${timezone}:`, error);
+  }
+}
+
+/**
  * Initialize notification schedules
  */
 function initNotificationSchedules() {
-  // Schedule daily at 8 PM for each timezone
+  // Schedule daily at 8 PM for each timezone (nutrition updates)
   cron.schedule('0 * * * *', async () => {
     try {
       // Get current hour
@@ -311,11 +380,61 @@ function initNotificationSchedules() {
         await sendNotificationsForTimezone('UTC');
       }
     } catch (error) {
-      console.error('Error in scheduled notification task:', error);
+      console.error('Error in scheduled nutrition notification task:', error);
     }
   });
   
-  console.log('Notification service initialized - scheduled for 8 PM in each timezone');
+  // Schedule engagement notifications at different times (12 PM, 4 PM)
+  cron.schedule('0 * * * *', async () => {
+    try {
+      // Get current hour
+      const currentHour = new Date().getUTCHours();
+      
+      // Common timezone offsets (simplified)
+      const timezoneMap = {
+        'UTC': 0,
+        'America/New_York': -5,
+        'America/Chicago': -6,
+        'America/Denver': -7,
+        'America/Los_Angeles': -8,
+        'Europe/London': 0,
+        'Europe/Paris': 1,
+        'Europe/Berlin': 1,
+        'Asia/Tokyo': 9,
+        'Asia/Shanghai': 8,
+        'Asia/Kolkata': 5.5,
+        'Australia/Sydney': 10
+      };
+      
+      // Find timezones where it's currently 12 PM or 4 PM
+      const targetTimezones = [];
+      for (const [timezone, offset] of Object.entries(timezoneMap)) {
+        const localHour = (currentHour + offset + 24) % 24;
+        if (localHour === 12 || localHour === 16) { // 12 PM or 4 PM
+          targetTimezones.push(timezone);
+        }
+      }
+      
+      if (targetTimezones.length > 0) {
+        console.log(`It's 12 PM or 4 PM in these timezones: ${targetTimezones.join(', ')}`);
+        
+        // Send engagement notifications for each timezone
+        for (const timezone of targetTimezones) {
+          await sendEngagementNotificationsForTimezone(timezone);
+        }
+      }
+      
+      // Also handle users with unknown timezones at 12 PM and 4 PM UTC
+      if (currentHour === 12 || currentHour === 16) {
+        await sendEngagementNotificationsForTimezone(null);
+        await sendEngagementNotificationsForTimezone('UTC');
+      }
+    } catch (error) {
+      console.error('Error in scheduled engagement notification task:', error);
+    }
+  });
+  
+  console.log('Notification service initialized - scheduled for 8 PM (nutrition), 12 PM and 4 PM (engagement) in each timezone');
   
   // For testing purposes, you can uncomment this to run immediately
   // sendDailyCalorieNotifications();
@@ -325,5 +444,6 @@ module.exports = {
   initNotificationSchedules,
   sendDailyCalorieNotifications,
   sendNotificationsForTimezone,
+  sendEngagementNotificationsForTimezone,
   generateNotificationMessage
 };

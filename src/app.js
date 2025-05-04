@@ -9,6 +9,7 @@ const profileRoutes = require('./routes/profileRoutes');
 const mealRoutes = require('./routes/mealRoutes');
 const notificationRoutes = require('./routes/notificationRoutes');
 const adminRoutes = require('./routes/adminRoutes');
+const engagementRoutes = require('./routes/engagementRoutes');
 const fs = require('fs');
 
 // Check if debug mode is enabled
@@ -76,6 +77,7 @@ app.use('/api/profile', profileRoutes);
 app.use('/api/meals', mealRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api/engagement', engagementRoutes);
 
 // Error handling middleware
 app.use((err, req, res, next) => {
