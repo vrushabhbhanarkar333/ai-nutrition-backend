@@ -63,91 +63,99 @@ const foodController = {
     try {
       const { foodItems, totalCalories, mealType } = req.body;
       const userId = req.user._id;
-
+  
       if (!foodItems || !Array.isArray(foodItems) || foodItems.length === 0) {
         return res.status(400).json({
           success: false,
           error: 'Food items are required and must be an array'
         });
       }
-
+  
       if (!mealType) {
         return res.status(400).json({
           success: false,
           error: 'Meal type is required'
         });
       }
-
-      // Validate meal type
+  
       const validMealTypes = ['breakfast', 'lunch', 'dinner', 'snack'];
       const validatedMealType = validMealTypes.includes(mealType) ? mealType : 'snack';
-      
-      // Validate food items meal types
-      const validatedFoodItems = foodItems.map(item => {
-        // Make a copy of the item to avoid modifying the original
-        const validatedItem = { ...item };
-        
-        // Ensure mealType is valid
-        if (!validMealTypes.includes(validatedItem.mealType)) {
-          validatedItem.mealType = validatedMealType;
-        }
-        
-        return validatedItem;
-      });
+  
+      const validatedFoodItems = foodItems.map(item => ({
+        ...item,
+        protein: item.protein || 0,
+        carbs: item.carbs || 0,
+        fat: item.fat || 0,
+        fiber: item.fiber || 0,
+        mealType: validMealTypes.includes(item.mealType) ? item.mealType : validatedMealType
+      }));
+  
+      // Calculate total nutrition values from food items
+      const totalNutrition = validatedFoodItems.reduce((totals, item) => ({
+        protein: totals.protein + (Number(item.protein) || 0),
+        carbs: totals.carbs + (Number(item.carbs) || 0),
+        fat: totals.fat + (Number(item.fat) || 0),
+        fiber: totals.fiber + (Number(item.fiber) || 0)
+      }), { protein: 0, carbs: 0, fat: 0, fiber: 0 });
+  
+      const processedFoodItems = validatedFoodItems.map(item => ({
+        name: item.name,
+        calories: item.calories,
+        servingSize: item.servingSize || '100g',
+        mealType: item.mealType,
+        isHealthy: item.isHealthy || false,
+        protein: Number(item.protein),
+        carbs: Number(item.carbs),
+        fat: Number(item.fat),
+        fiber: Number(item.fiber)
+      }));
 
-      // Create a new meal entry
       const meal = new Meal({
         userId,
-        foodItems: validatedFoodItems,
-        totalCalories: totalCalories || validatedFoodItems.reduce((sum, item) => sum + item.calories, 0),
+        foodItems: processedFoodItems,
+        totalCalories: totalCalories || processedFoodItems.reduce((sum, item) => sum + item.calories, 0),
         mealType: validatedMealType,
-        date: new Date()
+        date: new Date(),
+        totalNutrition
       });
-
+  
       await meal.save();
+      
       console.log(`Meal added for user ${userId}: ${meal.totalCalories} calories, type: ${validatedMealType}`);
-
-      // Update daily calorie count
+  
+      // Update daily calorie count using atomic update for efficiency
       const today = new Date();
       today.setHours(0, 0, 0, 0);
-
-      // Find or create daily calorie entry
-      let dailyCalorie = await DailyCalorie.findOne({
-        userId,
-        date: {
-          $gte: today,
-          $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000)
-        }
-      });
-
-      if (!dailyCalorie) {
-        dailyCalorie = new DailyCalorie({
-          userId,
-          date: today,
-          totalCalories: meal.totalCalories,
-          lastUpdated: new Date()
-        });
-      } else {
-        dailyCalorie.totalCalories += meal.totalCalories;
-        dailyCalorie.lastUpdated = new Date();
-      }
-
-      await dailyCalorie.save();
+  
+      let dailyCalorie = await DailyCalorie.findOneAndUpdate(
+        { userId, date: { $gte: today, $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000) } },
+        { $inc: { totalCalories: meal.totalCalories }, lastUpdated: new Date() },
+        { new: true, upsert: true }
+      );
+  
       console.log(`Daily calorie updated for user ${userId}: ${dailyCalorie.totalCalories} calories`);
-
-      res.status(201).json({
+  
+      const response = {
         success: true,
         data: {
           meal: {
             id: meal._id,
-            foodItems: meal.foodItems,
+            foodItems: processedFoodItems,
             totalCalories: meal.totalCalories,
+            totalNutrition: {
+              protein: parseFloat(totalNutrition.protein.toFixed(1)),
+              carbs: parseFloat(totalNutrition.carbs.toFixed(1)),
+              fat: parseFloat(totalNutrition.fat.toFixed(1)),
+              fiber: parseFloat(totalNutrition.fiber.toFixed(1))
+            },
             mealType: meal.mealType,
             date: meal.date
           },
           dailyCalories: dailyCalorie.totalCalories
         }
-      });
+      };
+      
+      res.status(201).json(response);
     } catch (error) {
       console.error('Error adding analyzed food:', error);
       res.status(500).json({
