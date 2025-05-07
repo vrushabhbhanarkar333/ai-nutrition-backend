@@ -6,6 +6,12 @@ const path = require('path');
 const { logRequest, logResponse, logError } = require('../utils/debugLogger');
 const { findSimilarMessages } = require('./embeddingService');
 const foodService = require('./foodService');
+const User = require('../models/User');
+const HealthData = require('../models/HealthData');
+const StatsData = require('../models/StatsData');
+const ActivityData = require('../models/ActivityData');
+const DietaryPreferences = require('../models/DietaryPreferences');
+const Notification = require('../models/Notification');
 
 // Initialize ClickHouse client
 const client = createClient({
@@ -112,12 +118,103 @@ const chatService = {
           hasImage: !!options.imageUrl
         }
       });
+
+      // 1. Gather all user data
+      const userData = await gatherUserData(userId);
       
-      // System prompt that defines the AI's behavior - simplified for faster responses
-      const systemPrompt = "You are a nutrition and fitness assistant. Keep responses brief and helpful. When food analysis data is provided, include it in your response. Reference previous conversations when relevant. Be friendly and conversational. Avoid special formatting characters. Provide practical advice that helps users improve their nutrition and fitness.";
+      // 2. Analyze the question type and intent
+      const questionAnalysis = await analyzeQuestion(message, userData);
       
-      let imageContent = '';
-      let foodAnalysisResult = null;
+      // 3. Prepare metadata for vector storage
+      const messageMetadata = {
+        message_type: options.isNotificationQuestion ? 'notification_question' : 'chat',
+        source: options.fromNotification ? 'notification' : 'chat',
+        has_image: options.imageUrl ? 'true' : 'false',
+        parent_message_id: options.parentMessageId || '',
+        conversation_type: options.conversationId ? 'thread' : 'new',
+        timestamp: new Date().toISOString(),
+        question_type: questionAnalysis.type,
+        question_intent: questionAnalysis.intent,
+        relevant_data_types: questionAnalysis.relevantDataTypes
+      };
+
+      // 4. Prepare comprehensive context for vector storage
+      const messageContext = {
+        user_id: userId,
+        conversation_id: options.conversationId || '',
+        environment: process.env.NODE_ENV || 'development',
+        platform: 'mobile',
+        version: process.env.APP_VERSION || '1.0.0',
+        user_profile: userData.profile,
+        health_data: userData.healthData,
+        stats_data: userData.statsData,
+        dietary_preferences: userData.dietaryPreferences,
+        recent_activities: userData.recentActivities
+      };
+
+      // 5. Enhanced system prompt with comprehensive context
+      const systemPrompt = `You are a nutrition and fitness assistant with access to comprehensive user data and conversation history. Your responses should be:
+
+1. Data Integration and Context:
+   - User Profile: ${JSON.stringify(userData.profile)}
+   - Health Data: ${JSON.stringify(userData.healthData)}
+   - Stats Data: ${JSON.stringify(userData.statsData)}
+   - Dietary Preferences: ${JSON.stringify(userData.dietaryPreferences)}
+   - Recent Activities: ${JSON.stringify(userData.recentActivities)}
+   - Previous Conversations: ${JSON.stringify(await fetchChatHistory(options.conversationId))}
+   - Notification History: ${JSON.stringify(await fetchNotificationHistory(userId))}
+
+2. Question Analysis:
+   - Type: ${questionAnalysis.type}
+   - Intent: ${questionAnalysis.intent}
+   - Relevant Data Types: ${questionAnalysis.relevantDataTypes.join(', ')}
+   - Context: ${questionAnalysis.context || 'general'}
+
+3. Response Guidelines:
+   - Combine user data with general nutrition/fitness knowledge
+   - Reference specific metrics from user's history
+   - Connect current question with previous interactions
+   - Consider notification context if applicable
+   - Maintain conversation flow and context
+   - Provide actionable, personalized advice
+   - Use both specific user data and general knowledge
+   - Keep responses concise but comprehensive
+
+4. Data Integration Strategy:
+   - Primary Data Sources:
+     * User's personal metrics and history
+     * Previous conversation context
+     * Notification questions and responses
+     * Recent activities and progress
+   - Secondary Knowledge:
+     * General nutrition principles
+     * Fitness best practices
+     * Health guidelines
+     * Scientific research
+
+5. Context Awareness:
+   - Track conversation threads
+   - Reference previous notification questions
+   - Consider user's progress over time
+   - Maintain awareness of user's goals
+   - Connect related topics across conversations
+
+6. Response Structure:
+   - Acknowledge user's specific situation
+   - Reference relevant historical data
+   - Provide personalized advice
+   - Include actionable next steps
+   - Connect with previous interactions
+   - Maintain conversation continuity
+
+Remember to:
+1. Always consider the user's complete context
+2. Reference specific data points when relevant
+3. Connect current questions with past interactions
+4. Balance personal data with general knowledge
+5. Maintain conversation flow and context
+6. Provide practical, actionable advice`;
+
       // Initialize messages array with system message
       const messages = [
         {
@@ -126,335 +223,231 @@ const chatService = {
         }
       ];
 
-      // If there's an image, analyze it first
-      if (options.imageUrl) {
-        console.log('\n==== IMAGE ANALYSIS ATTEMPT ====');
-        console.log('Image URL:', options.imageUrl);
-        try {
-          // Debug: Log image processing
-          logRequest(`${ENDPOINT_SERVICE}/image-analysis`, {
-            imagePath: options.imageUrl
-          });
-          
-          // Handle both relative and absolute paths
-          let imagePath;
-          
-          // If the path is already absolute, use it directly
-          if (options.imageUrl.startsWith('/') || options.imageUrl.includes(':/')) {
-            imagePath = options.imageUrl;
-          } else {
-            // Otherwise, construct the path based on environment
-            if (process.env.NODE_ENV === 'production') {
-              // In production, use path relative to the root directory
-              imagePath = path.join(process.cwd(), options.imageUrl);
-            } else {
-              // In development, use the absolute path
-              imagePath = path.join('d:/freelance_project/ai-nutrition-backend', options.imageUrl);
-            }
-          }
-          
-          console.log(`Reading image file from: ${imagePath}`);
-          
-          // Check if file exists
-          if (!fs.existsSync(imagePath)) {
-            console.error(`Image file does not exist at path: ${imagePath}`);
-            console.log('Trying alternative path...');
-            
-            // Try an alternative path
-            const altPath = path.join(process.cwd(), options.imageUrl.replace(/^\//, ''));
-            console.log(`Trying alternative path: ${altPath}`);
-            
-            if (fs.existsSync(altPath)) {
-              imagePath = altPath;
-              console.log(`Found image at alternative path: ${imagePath}`);
-            } else {
-              throw new Error('Image file not found');
-            }
-          }
-          
-          const imageBuffer = fs.readFileSync(imagePath);
-          console.log(`Image buffer size: ${imageBuffer.length} bytes`);
-          
-          // Use the food service to analyze the image
-          console.log('Calling food service to analyze image...');
-          try {
-            foodAnalysisResult = await foodService.analyzeFood(imageBuffer);
-            console.log('Food analysis result:', JSON.stringify(foodAnalysisResult));
-          } catch (foodError) {
-            console.error('Error in food analysis:', foodError);
-            // We'll continue with the Vision API below
-          }
-          
-          if (foodAnalysisResult && !foodAnalysisResult.error) {
-            // Format the food analysis result into a readable message
-            const foodItems = foodAnalysisResult.foodItems;
-            let analysisText = "I've analyzed your food image and identified the following items:\n\n";
-            
-            foodItems.forEach(item => {
-              analysisText += `${item.name}: ${item.calories} calories per 100g. `;
-              analysisText += `Contains ${item.protein}g protein, ${item.carbs}g carbs, ${item.fat}g fat, and ${item.fiber}g fiber. `;
-              analysisText += `This food is generally considered ${item.isHealthy ? 'healthy' : 'less healthy'}.\n\n`;
-            });
-            
-            analysisText += `Total estimated calories: ${foodAnalysisResult.totalCalories}`;
-            
-            imageContent = analysisText;
-          } else {
-            // Fall back to Vision API
-            console.log('Food analysis failed or returned an error, falling back to Vision API');
-            const base64Image = imageBuffer.toString('base64');
-            
-            // Debug: Log OpenAI Vision API call
-            logRequest(`${ENDPOINT_SERVICE}/vision-api`, {
-              model: "gpt-4-vision-preview",
-              imageSize: Math.round(base64Image.length / 1024) + 'KB'
-            });
-
-            // Get image description from OpenAI Vision API
-            const visionResponse = await openai.chat.completions.create({
-              model: "gpt-4-vision-preview",
-              messages: [
-                {
-                  role: "user",
-                  content: [
-                    {
-                      type: "text",
-                      text: "Analyze this food image in detail. Describe what you see, identify the foods, estimate nutritional content, and suggest any health considerations. Be thorough in your analysis."
-                    },
-                    {
-                      type: "image_url",
-                      image_url: {
-                        url: `data:image/jpeg;base64,${base64Image}`
-                      }
-                    }
-                  ]
-                }
-              ],
-              max_tokens: 500
-            });
-            
-            // Debug: Log Vision API response
-            logResponse(`${ENDPOINT_SERVICE}/vision-api`, {
-              responseLength: visionResponse.choices[0].message.content.length,
-              preview: visionResponse.choices[0].message.content.substring(0, 50) + '...',
-              usage: visionResponse.usage
-            });
-
-            imageContent = visionResponse.choices[0].message.content;
-          }
-          
-          console.log(`Image analysis: ${imageContent.substring(0, 100)}...`);
-          
-          // Add image analysis as a system message
+      // 6. Add relevant historical data based on question analysis
+      if (questionAnalysis.relevantDataTypes.includes('conversation_history')) {
+        const history = await fetchChatHistory(options.conversationId);
+        if (history.length > 0) {
           messages.push({
             role: "system",
-            content: `I've analyzed the image the user shared. Here's what I can see: ${imageContent}`
+            content: "Relevant conversation history:"
           });
-          
-          // Don't add a direct assistant message about the image - we'll let the model generate a complete response
-        } catch (imageError) {
-          // Debug: Log image processing error
-          console.error('Error processing image:', imageError);
-          logError(`${ENDPOINT_SERVICE}/image-analysis`, imageError);
-          
-          // Continue without image analysis
-          messages.push({
-            role: "assistant",
-            content: "I notice you've shared an image, but I couldn't analyze it properly. Let me still try to help with your question."
-          });
-        }
-      }
-
-      // Get conversation history if this is part of a thread
-      if (options.conversationId) {
-        try {
-          // Debug: Log conversation history retrieval
-          logRequest(`${ENDPOINT_SERVICE}/conversation-history`, {
-            conversationId: options.conversationId
-          });
-          
-          const history = await Chat.find({
-            conversationId: options.conversationId,
-            createdAt: { 
-              $lt: new Date() 
-            }
-          })
-          .sort({ createdAt: 1 }) // Sort in chronological order (oldest first)
-          .limit(15)  // Limit to 15 messages for context
-          .lean();
-          
-          // Debug: Log history retrieval results
-          logResponse(`${ENDPOINT_SERVICE}/conversation-history`, {
-            messageCount: history.length,
-            messageTypes: history.map(msg => msg.isAI ? 'AI' : 'User')
-          });
-
-          if (history.length > 0) {
-            // Add each message from history to the messages array with proper role
-            history.forEach(msg => {
-              messages.push({
-                role: msg.isAI ? "assistant" : "user",
-                content: msg.message
-              });
-            });
-          }
-        } catch (historyError) {
-          // Debug: Log history retrieval error
-          logError(`${ENDPOINT_SERVICE}/conversation-history`, historyError);
-          
-          // Add a note about missing history
-          messages.push({
-            role: "system",
-            content: "Note: Unable to retrieve conversation history. Responding based on current message only."
-          });
-        }
-      }
-
-      // Find relevant previous messages using vector search
-      try {
-        logRequest(`${ENDPOINT_SERVICE}/vector-search`, {
-          userId,
-          messagePreview: message.substring(0, 50) + (message.length > 50 ? '...' : '')
-        });
-        
-        const similarMessages = await findSimilarMessages(userId, message, 3);
-        
-        logResponse(`${ENDPOINT_SERVICE}/vector-search`, {
-          count: similarMessages.length,
-          messages: similarMessages.map(m => ({
-            similarity: m.similarity,
-            isAI: m.is_ai,
-            preview: m.message.substring(0, 30) + '...'
-          }))
-        });
-        
-        // If we found similar messages, add them as context
-        if (similarMessages.length > 0) {
-          // Add a system message explaining the context
-          messages.push({
-            role: "system",
-            content: "I found some relevant information from your previous conversations that might help with your current question:"
-          });
-          
-          // Add each similar message with its context
-          similarMessages.forEach(m => {
+          history.forEach(msg => {
             messages.push({
-              role: m.is_ai ? "assistant" : "user",
-              content: m.message
+              role: msg.isAI ? "assistant" : "user",
+              content: msg.message
             });
           });
-          
-          // Add a separator
+        }
+      }
+
+      // 7. Add notification history if relevant
+      if (questionAnalysis.isNotificationRelated) {
+        const notificationHistory = await fetchNotificationHistory(userId);
+        if (notificationHistory.length > 0) {
           messages.push({
             role: "system",
-            content: "Now, let me address your current question specifically."
+            content: "Relevant notification history:"
+          });
+          notificationHistory.forEach(notification => {
+            messages.push({
+              role: "system",
+              content: `Notification: ${notification.question}\nResponse: ${notification.answer}`
+            });
           });
         }
-      } catch (vectorError) {
-        // Log error but continue without vector search results
-        logError(`${ENDPOINT_SERVICE}/vector-search`, vectorError);
       }
-      
-      // Add the current user message, including reference to the image if one was uploaded
-      if (options.imageUrl) {
-        messages.push({
-          role: "user",
-          content: `${message} (I've also shared an image for you to analyze)`
-        });
-      } else {
-        messages.push({
-          role: "user",
-          content: message
-        });
-      }
-      
-      // If we have food analysis, make sure it's prominently included in the system message
-      if (foodAnalysisResult && !foodAnalysisResult.error) {
-        // Add a specific system message about the food analysis
+
+      // 8. Add similar messages from vector search
+      const similarMessages = await findSimilarMessages(userId, message, 3);
+      if (similarMessages.length > 0) {
         messages.push({
           role: "system",
-          content: `IMPORTANT: The user has shared an image of food. Your analysis MUST include the following nutritional information: ${JSON.stringify(foodAnalysisResult, null, 2)}`
+          content: "Similar previous interactions:"
+        });
+        similarMessages.forEach(m => {
+          messages.push({
+            role: m.is_ai ? "assistant" : "user",
+            content: m.message
+          });
         });
       }
-      
-      // Debug: Log messages array
-      logRequest(`${ENDPOINT_SERVICE}/openai-completion`, {
-        model: "gpt-4-turbo-preview",
-        messagesCount: messages.length,
-        preview: JSON.stringify(messages).substring(0, 100) + '...'
+
+      // 9. Add the current user message with context
+      messages.push({
+        role: "user",
+        content: message
       });
 
-      // Get AI response with proper conversation context - use faster model for better UX
+      // 10. Get AI response with comprehensive context
       const response = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo", // Use faster model for quicker responses
+        model: "gpt-3.5-turbo",
         messages: messages,
         max_tokens: 500,
         temperature: 0.7
       });
-      
-      // Debug: Log OpenAI response
-      logResponse(`${ENDPOINT_SERVICE}/openai-completion`, {
-        responseLength: response.choices[0].message.content.length,
-        preview: response.choices[0].message.content.substring(0, 50) + '...',
-        usage: response.usage
-      });
 
-      // Process the response to ensure no special characters
+      // Process and clean the response
       let cleanedResponse = response.choices[0].message.content.trim();
-      
-      // Remove any markdown formatting if present (*, #, etc.)
       cleanedResponse = cleanedResponse
-        .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold formatting
-        .replace(/\*(.*?)\*/g, '$1')     // Remove italic formatting
-        .replace(/^#+\s+/gm, '')         // Remove heading markers
-        .replace(/^[-*+]\s+/gm, '• ')    // Replace bullet points with a simple bullet
-        .replace(/`([^`]+)`/g, '$1');    // Remove code formatting
-      
-      // If we have food analysis, include it in the response
-      if (foodAnalysisResult && !foodAnalysisResult.error) {
-        // Generate a food analysis response
-        let foodAnalysis = `I've analyzed your food image and identified the following:\n\n`;
-        
-        foodAnalysisResult.foodItems.forEach(item => {
-          foodAnalysis += `• ${item.name}: ${item.calories} calories per 100g serving\n`;
-          foodAnalysis += `  - Protein: ${item.protein}g\n`;
-          foodAnalysis += `  - Carbs: ${item.carbs}g\n`;
-          foodAnalysis += `  - Fat: ${item.fat}g\n`;
-          foodAnalysis += `  - Fiber: ${item.fiber}g\n`;
-          foodAnalysis += `  - Health assessment: ${item.isHealthy ? 'Healthy choice' : 'Less healthy option'}\n\n`;
-        });
-        
-        foodAnalysis += `Total estimated calories: ${foodAnalysisResult.totalCalories}\n\n`;
-        
-        // Combine AI response with food analysis
-        cleanedResponse = foodAnalysis + cleanedResponse;
-      }
+        .replace(/\*\*(.*?)\*\*/g, '$1')
+        .replace(/\*(.*?)\*/g, '$1')
+        .replace(/^#+\s+/gm, '')
+        .replace(/^[-*+]\s+/gm, '• ')
+        .replace(/`([^`]+)`/g, '$1');
 
-      const result = {
+      // Store the interaction in vector database
+      await processMessageEmbedding(
+        userId,
+        options.conversationId,
+        options.messageId || Date.now().toString(),
+        message,
+        false,
+        messageMetadata,
+        messageContext
+      );
+
+      await processMessageEmbedding(
+        userId,
+        options.conversationId,
+        (Date.now() + 1).toString(),
+        cleanedResponse,
+        true,
+        {
+          ...messageMetadata,
+          response_to_message_id: options.messageId || '',
+          response_type: 'ai_assistant',
+          response_quality: 'high'
+        },
+        {
+          ...messageContext,
+          response_context: JSON.stringify({
+            model: 'gpt-3.5-turbo',
+            temperature: 0.7,
+            max_tokens: 500
+          })
+        }
+      );
+
+      return {
         message: cleanedResponse,
-        imageAnalysis: imageContent || null,
-        foodAnalysis: foodAnalysisResult || null
+        questionAnalysis,
+        relevantData: {
+          userProfile: userData.profile,
+          healthData: userData.healthData,
+          statsData: userData.statsData
+        }
       };
-      
-      // Debug: Log final result
-      logResponse(ENDPOINT_SERVICE, {
-        messageLength: result.message.length,
-        hasImageAnalysis: !!result.imageAnalysis,
-        imageAnalysisLength: result.imageAnalysis ? result.imageAnalysis.length : 0,
-        hasFoodAnalysis: !!result.foodAnalysis
-      });
-      
-      return result;
+
     } catch (error) {
       console.error('Error in processMessage:', error);
-      
-      // Debug: Log service error
       logError(ENDPOINT_SERVICE, error);
-      
       throw error;
     }
   }
 };
+
+// Helper function to gather all user data
+async function gatherUserData(userId) {
+  try {
+    // Fetch user profile
+    const userProfile = await User.findById(userId);
+    
+    // Fetch health data
+    const healthData = await HealthData.findOne({ userId });
+    
+    // Fetch stats data
+    const statsData = await StatsData.findOne({ userId });
+    
+    // Fetch recent activities
+    const recentActivities = await ActivityData.find({ userId })
+      .sort({ timestamp: -1 })
+      .limit(10);
+    
+    // Fetch dietary preferences
+    const dietaryPreferences = await DietaryPreferences.findOne({ userId });
+
+    return {
+      profile: userProfile,
+      healthData,
+      statsData,
+      recentActivities,
+      dietaryPreferences
+    };
+  } catch (error) {
+    console.error('Error gathering user data:', error);
+    return {
+      profile: null,
+      healthData: null,
+      statsData: null,
+      recentActivities: [],
+      dietaryPreferences: null
+    };
+  }
+}
+
+// Helper function to analyze question type and intent
+async function analyzeQuestion(message, userData) {
+  try {
+    const analysisResponse = await openai.chat.completions.create({
+      model: "gpt-3.5-turbo",
+      messages: [
+        {
+          role: "system",
+          content: `Analyze the following question and determine:
+1. Question type (nutrition, fitness, general, etc.)
+2. User intent
+3. Relevant data types needed to answer
+4. Whether it's related to previous notifications
+5. If it requires specific user data (calories, stats, etc.)`
+        },
+        {
+          role: "user",
+          content: message
+        }
+      ],
+      max_tokens: 200,
+      temperature: 0.3
+    });
+
+    const analysis = JSON.parse(analysisResponse.choices[0].message.content);
+    return {
+      type: analysis.questionType,
+      intent: analysis.intent,
+      relevantDataTypes: analysis.relevantDataTypes,
+      isNotificationRelated: analysis.isNotificationRelated,
+      requiresUserData: analysis.requiresUserData
+    };
+  } catch (error) {
+    console.error('Error analyzing question:', error);
+    return {
+      type: 'general',
+      intent: 'unknown',
+      relevantDataTypes: ['conversation_history'],
+      isNotificationRelated: false,
+      requiresUserData: false
+    };
+  }
+}
+
+// Helper function to fetch notification history
+async function fetchNotificationHistory(userId) {
+  try {
+    const notifications = await Notification.find({ userId })
+      .sort({ timestamp: -1 })
+      .limit(10)
+      .lean();
+    
+    return notifications.map(notification => ({
+      question: notification.question,
+      answer: notification.answer,
+      timestamp: notification.timestamp,
+      type: notification.type
+    }));
+  } catch (error) {
+    console.error('Error fetching notification history:', error);
+    return [];
+  }
+}
 
 module.exports = {
   initializeChatTable,
