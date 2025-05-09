@@ -306,7 +306,7 @@ const findSimilarMessages = async (userId, queryText, limit = 5) => {
 };
 
 // Process a new chat message to generate and store its embedding
-const processMessageEmbedding = async (userId, conversationId, messageId, message, isAi) => {
+const processMessageEmbedding = async (userId, conversationId, messageId, message, isAi, metadata = {}, context = {}) => {
   try {
     console.log(`Processing embedding for message ${messageId} (${isAi ? 'AI' : 'User'})...`);
     
@@ -335,8 +335,8 @@ const processMessageEmbedding = async (userId, conversationId, messageId, messag
     
     console.log(`Successfully generated embedding with ${embedding.length} dimensions`);
     
-    // Store embedding
-    await storeEmbedding(userId, conversationId, messageId, truncatedMessage, isAi, embedding);
+    // Store embedding with metadata and context
+    await storeEmbedding(userId, conversationId, messageId, truncatedMessage, isAi, embedding, metadata, context);
     
     console.log(`Completed embedding process for message ${messageId}`);
     return true;

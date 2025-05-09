@@ -4,7 +4,7 @@ const Chat = require('../models/Chat');
 const fs = require('fs');
 const path = require('path');
 const { logRequest, logResponse, logError } = require('../utils/debugLogger');
-const { findSimilarMessages } = require('./embeddingService');
+const { findSimilarMessages, processMessageEmbedding } = require('./embeddingService');
 const foodService = require('./foodService');
 const User = require('../models/User');
 const HealthData = require('../models/HealthData');
@@ -149,7 +149,9 @@ const chatService = {
         health_data: userData.healthData,
         stats_data: userData.statsData,
         dietary_preferences: userData.dietaryPreferences,
-        recent_activities: userData.recentActivities
+        recent_activities: userData.recentActivities,
+        calorie_intake: userData.calorieIntake,
+        recent_meals: userData.recentMeals
       };
 
       // 5. Enhanced system prompt with comprehensive context
@@ -161,6 +163,8 @@ const chatService = {
    - Stats Data: ${JSON.stringify(userData.statsData)}
    - Dietary Preferences: ${JSON.stringify(userData.dietaryPreferences)}
    - Recent Activities: ${JSON.stringify(userData.recentActivities)}
+   - Calorie Intake: ${JSON.stringify(userData.calorieIntake)}
+   - Recent Meals: ${JSON.stringify(userData.recentMeals)}
    - Previous Conversations: ${JSON.stringify(await fetchChatHistory(options.conversationId))}
    - Notification History: ${JSON.stringify(await fetchNotificationHistory(userId))}
 
@@ -334,7 +338,9 @@ Remember to:
         relevantData: {
           userProfile: userData.profile,
           healthData: userData.healthData,
-          statsData: userData.statsData
+          statsData: userData.statsData,
+          calorieIntake: userData.calorieIntake,
+          recentMeals: userData.recentMeals
         }
       };
 
@@ -366,12 +372,32 @@ async function gatherUserData(userId) {
     // Fetch dietary preferences
     const dietaryPreferences = await DietaryPreferences.findOne({ userId });
 
+    // Fetch daily calorie data
+    const DailyCalorie = require('../models/DailyCalorie');
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    
+    const dailyCalories = await DailyCalorie.find({
+      userId,
+      date: { $gte: today, $lt: tomorrow }
+    }).sort({ date: -1 }).limit(1);
+    
+    // Fetch recent meals
+    const Meal = require('../models/Meal');
+    const recentMeals = await Meal.find({ userId })
+      .sort({ date: -1 })
+      .limit(5);
+
     return {
       profile: userProfile,
       healthData,
       statsData,
       recentActivities,
-      dietaryPreferences
+      dietaryPreferences,
+      calorieIntake: dailyCalories.length > 0 ? dailyCalories[0] : null,
+      recentMeals
     };
   } catch (error) {
     console.error('Error gathering user data:', error);
@@ -380,7 +406,9 @@ async function gatherUserData(userId) {
       healthData: null,
       statsData: null,
       recentActivities: [],
-      dietaryPreferences: null
+      dietaryPreferences: null,
+      calorieIntake: null,
+      recentMeals: []
     };
   }
 }
@@ -396,7 +424,7 @@ async function analyzeQuestion(message, userData) {
           content: `Analyze the following question and determine:
 1. Question type (nutrition, fitness, general, etc.)
 2. User intent
-3. Relevant data types needed to answer
+3. Relevant data types needed to answer (choose from: conversation_history, user_profile, health_data, stats_data, dietary_preferences, recent_activities, calorie_intake, recent_meals)
 4. Whether it's related to previous notifications
 5. If it requires specific user data (calories, stats, etc.)`
         },
