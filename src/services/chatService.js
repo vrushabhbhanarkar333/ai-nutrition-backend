@@ -12,6 +12,8 @@ const StatsData = require('../models/StatsData');
 const ActivityData = require('../models/ActivityData');
 const DietaryPreferences = require('../models/DietaryPreferences');
 const Notification = require('../models/Notification');
+const healthKitService = require('./healthKitService');
+const Meal = require('../models/Meal');
 
 // Initialize ClickHouse client
 const client = createClient({
@@ -151,75 +153,14 @@ const chatService = {
         dietary_preferences: userData.dietaryPreferences,
         recent_activities: userData.recentActivities,
         calorie_intake: userData.calorieIntake,
-        recent_meals: userData.recentMeals
+        recent_meals: userData.recentMeals,
+        healthKitData: userData.healthKitData
       };
 
-      // 5. Enhanced system prompt with comprehensive context
-      const systemPrompt = `You are a nutrition and fitness assistant with access to comprehensive user data and conversation history. Your responses should be:
-
-1. Data Integration and Context:
-   - User Profile: ${JSON.stringify(userData.profile)}
-   - Health Data: ${JSON.stringify(userData.healthData)}
-   - Stats Data: ${JSON.stringify(userData.statsData)}
-   - Dietary Preferences: ${JSON.stringify(userData.dietaryPreferences)}
-   - Recent Activities: ${JSON.stringify(userData.recentActivities)}
-   - Calorie Intake: ${JSON.stringify(userData.calorieIntake)}
-   - Recent Meals: ${JSON.stringify(userData.recentMeals)}
-   - Previous Conversations: ${JSON.stringify(await fetchChatHistory(options.conversationId))}
-   - Notification History: ${JSON.stringify(await fetchNotificationHistory(userId))}
-
-2. Question Analysis:
-   - Type: ${questionAnalysis.type}
-   - Intent: ${questionAnalysis.intent}
-   - Relevant Data Types: ${questionAnalysis.relevantDataTypes.join(', ')}
-   - Context: ${questionAnalysis.context || 'general'}
-
-3. Response Guidelines:
-   - Combine user data with general nutrition/fitness knowledge
-   - Reference specific metrics from user's history
-   - Connect current question with previous interactions
-   - Consider notification context if applicable
-   - Maintain conversation flow and context
-   - Provide actionable, personalized advice
-   - Use both specific user data and general knowledge
-   - Keep responses concise but comprehensive
-
-4. Data Integration Strategy:
-   - Primary Data Sources:
-     * User's personal metrics and history
-     * Previous conversation context
-     * Notification questions and responses
-     * Recent activities and progress
-   - Secondary Knowledge:
-     * General nutrition principles
-     * Fitness best practices
-     * Health guidelines
-     * Scientific research
-
-5. Context Awareness:
-   - Track conversation threads
-   - Reference previous notification questions
-   - Consider user's progress over time
-   - Maintain awareness of user's goals
-   - Connect related topics across conversations
-
-6. Response Structure:
-   - Acknowledge user's specific situation
-   - Reference relevant historical data
-   - Provide personalized advice
-   - Include actionable next steps
-   - Connect with previous interactions
-   - Maintain conversation continuity
-
-Remember to:
-1. Always consider the user's complete context
-2. Reference specific data points when relevant
-3. Connect current questions with past interactions
-4. Balance personal data with general knowledge
-5. Maintain conversation flow and context
-6. Provide practical, actionable advice`;
-
-      // Initialize messages array with system message
+      // Get enhanced system prompt
+      const systemPrompt = await getEnhancedSystemPrompt(userData, questionAnalysis);
+      
+      // Initialize messages array with enhanced system prompt
       const messages = [
         {
           role: "system",
@@ -227,13 +168,13 @@ Remember to:
         }
       ];
 
-      // 6. Add relevant historical data based on question analysis
+      // Add conversation history if relevant
       if (questionAnalysis.relevantDataTypes.includes('conversation_history')) {
         const history = await fetchChatHistory(options.conversationId);
         if (history.length > 0) {
           messages.push({
             role: "system",
-            content: "Relevant conversation history:"
+            content: "Previous conversation context:"
           });
           history.forEach(msg => {
             messages.push({
@@ -244,7 +185,7 @@ Remember to:
         }
       }
 
-      // 7. Add notification history if relevant
+      // Add notification history if relevant
       if (questionAnalysis.isNotificationRelated) {
         const notificationHistory = await fetchNotificationHistory(userId);
         if (notificationHistory.length > 0) {
@@ -255,58 +196,138 @@ Remember to:
           notificationHistory.forEach(notification => {
             messages.push({
               role: "system",
-              content: `Notification: ${notification.question}\nResponse: ${notification.answer}`
+              content: `Previous notification: ${notification.question}\nYour response: ${notification.answer}`
             });
           });
         }
       }
 
-      // 8. Add similar messages from vector search
-      const similarMessages = await findSimilarMessages(userId, message, 3);
-      if (similarMessages.length > 0) {
-        messages.push({
-          role: "system",
-          content: "Similar previous interactions:"
+      // Find relevant previous messages using vector search
+      try {
+        logRequest(`${ENDPOINT_SERVICE}/vector-search`, {
+          userId,
+          messagePreview: message.substring(0, 50) + (message.length > 50 ? '...' : '')
         });
-        similarMessages.forEach(m => {
+        
+        // Get similar messages with higher weight for recent data
+        const similarMessages = await findSimilarMessages(userId, message, 5);
+        
+        logResponse(`${ENDPOINT_SERVICE}/vector-search`, {
+          count: similarMessages.length,
+          messages: similarMessages.map(m => ({
+            similarity: m.similarity,
+            isAI: m.is_ai,
+            preview: m.message.substring(0, 30) + '...'
+          }))
+        });
+        
+        // If we found similar messages, add them as context
+        if (similarMessages.length > 0) {
+          // Group messages by type
+          const healthKitMessages = similarMessages.filter(m => m.metadata?.message_type === 'healthkit_data');
+          const mealMessages = similarMessages.filter(m => m.metadata?.message_type === 'meal_data');
+          const chatMessages = similarMessages.filter(m => m.metadata?.message_type === 'chat');
+
+          // Add a system message explaining the context
           messages.push({
-            role: m.is_ai ? "assistant" : "user",
-            content: m.message
+            role: "system",
+            content: "I found some relevant information from your previous conversations and data that might help with your current question:"
           });
-        });
+
+          // Add health data context if available
+          if (healthKitMessages.length > 0) {
+            messages.push({
+              role: "system",
+              content: "Recent Health Data:\n" + healthKitMessages.map(m => m.message).join('\n')
+            });
+          }
+
+          // Add meal data context if available
+          if (mealMessages.length > 0) {
+            messages.push({
+              role: "system",
+              content: "Recent Meal Data:\n" + mealMessages.map(m => m.message).join('\n')
+            });
+          }
+
+          // Add relevant chat history
+          if (chatMessages.length > 0) {
+            messages.push({
+              role: "system",
+              content: "Relevant Previous Conversations:\n" + chatMessages.map(m => 
+                `${m.is_ai ? 'Assistant' : 'User'}: ${m.message}`
+              ).join('\n')
+            });
+          }
+          
+          // Add a separator
+          messages.push({
+            role: "system",
+            content: "Now, let me address your current question specifically."
+          });
+        }
+      } catch (vectorError) {
+        // Log error but continue without vector search results
+        logError(`${ENDPOINT_SERVICE}/vector-search`, vectorError);
       }
 
-      // 9. Add the current user message with context
+      // Add the current user message
       messages.push({
         role: "user",
         content: message
       });
 
-      // 10. Get AI response with comprehensive context
+      // Get AI response with enhanced context
       const response = await openai.chat.completions.create({
         model: "gpt-3.5-turbo",
         messages: messages,
-        max_tokens: 500,
-        temperature: 0.7
+        max_tokens: 1000,
+        temperature: 0.7,
+        presence_penalty: 0.6,
+        frequency_penalty: 0.3,
+        top_p: 0.9,
+        stop: ["\n\n", "User:", "Assistant:"]
       });
 
       // Process and clean the response
       let cleanedResponse = response.choices[0].message.content.trim();
-      cleanedResponse = cleanedResponse
-        .replace(/\*\*(.*?)\*\*/g, '$1')
-        .replace(/\*(.*?)\*/g, '$1')
-        .replace(/^#+\s+/gm, '')
-        .replace(/^[-*+]\s+/gm, '• ')
-        .replace(/`([^`]+)`/g, '$1');
+      
+      // Format the response based on question type
+      if (questionAnalysis.type === 'meal') {
+        // For meal-related questions, ensure proper formatting of meal data
+        cleanedResponse = cleanedResponse
+          .replace(/\*\*(.*?)\*\*/g, '$1')
+          .replace(/\*(.*?)\*/g, '$1')
+          .replace(/^#+\s+/gm, '')
+          .replace(/^[-*+]\s+/gm, '• ')
+          .replace(/`([^`]+)`/g, '$1')
+          .replace(/(\d+\.\s*[A-Za-z]+:)/g, '\n$1') // Add line breaks before meal entries
+          .replace(/(\s*-\s*[A-Za-z]+:)/g, '\n  $1'); // Indent meal details
+      } else {
+        // For other questions, use standard formatting
+        cleanedResponse = cleanedResponse
+          .replace(/\*\*(.*?)\*\*/g, '$1')
+          .replace(/\*(.*?)\*/g, '$1')
+          .replace(/^#+\s+/gm, '')
+          .replace(/^[-*+]\s+/gm, '• ')
+          .replace(/`([^`]+)`/g, '$1');
+      }
 
-      // Store the interaction in vector database
+      // Store the interaction in vector database with enhanced metadata
       await processMessageEmbedding(
         userId,
         options.conversationId,
         options.messageId || Date.now().toString(),
         message,
         false,
-        messageMetadata,
+        {
+          ...messageMetadata,
+          question_type: questionAnalysis.type,
+          question_intent: questionAnalysis.intent,
+          relevant_data_types: questionAnalysis.relevantDataTypes,
+          has_health_data: questionAnalysis.isHealthRelated,
+          has_meal_data: questionAnalysis.isMealRelated
+        },
         messageContext
       );
 
@@ -320,14 +341,20 @@ Remember to:
           ...messageMetadata,
           response_to_message_id: options.messageId || '',
           response_type: 'ai_assistant',
-          response_quality: 'high'
+          response_quality: 'high',
+          question_type: questionAnalysis.type,
+          question_intent: questionAnalysis.intent,
+          relevant_data_types: questionAnalysis.relevantDataTypes
         },
         {
           ...messageContext,
           response_context: JSON.stringify({
             model: 'gpt-3.5-turbo',
             temperature: 0.7,
-            max_tokens: 500
+            max_tokens: 800,
+            presence_penalty: 0.6,
+            frequency_penalty: 0.3,
+            top_p: 0.9
           })
         }
       );
@@ -339,8 +366,7 @@ Remember to:
           userProfile: userData.profile,
           healthData: userData.healthData,
           statsData: userData.statsData,
-          calorieIntake: userData.calorieIntake,
-          recentMeals: userData.recentMeals
+          healthKitData: userData.healthKitData
         }
       };
 
@@ -353,112 +379,133 @@ Remember to:
 };
 
 // Helper function to gather all user data
-async function gatherUserData(userId) {
+const gatherUserData = async (userId) => {
   try {
-    // Fetch user profile
-    const userProfile = await User.findById(userId);
+    // Get user profile
+    const user = await User.findById(userId);
     
-    // Fetch health data
+    // Get health data
     const healthData = await HealthData.findOne({ userId });
     
-    // Fetch stats data
+    // Get stats data
     const statsData = await StatsData.findOne({ userId });
     
-    // Fetch recent activities
-    const recentActivities = await ActivityData.find({ userId })
-      .sort({ timestamp: -1 })
-      .limit(10);
+    // Get activity data
+    const activityData = await ActivityData.findOne({ userId });
     
-    // Fetch dietary preferences
+    // Get dietary preferences
     const dietaryPreferences = await DietaryPreferences.findOne({ userId });
-
-    // Fetch daily calorie data
-    const DailyCalorie = require('../models/DailyCalorie');
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
     
-    const dailyCalories = await DailyCalorie.find({
-      userId,
-      date: { $gte: today, $lt: tomorrow }
-    }).sort({ date: -1 }).limit(1);
+    // Get latest HealthKit data (steps only)
+    const latestHealthKitData = await healthKitService.getLatestHealthKitData(userId);
     
-    // Fetch recent meals
-    const Meal = require('../models/Meal');
+    // Get aggregated HealthKit data for the last 7 days (steps only)
+    const aggregatedHealthKitData = await healthKitService.getAggregatedHealthKitData(userId, 7);
+    
+    // Get recent meals from our app's implementation
     const recentMeals = await Meal.find({ userId })
       .sort({ date: -1 })
-      .limit(5);
+      .limit(5)
+      .lean();
 
     return {
-      profile: userProfile,
+      profile: user,
       healthData,
       statsData,
-      recentActivities,
+      activityData,
       dietaryPreferences,
-      calorieIntake: dailyCalories.length > 0 ? dailyCalories[0] : null,
+      healthKitData: {
+        latest: latestHealthKitData,
+        aggregated: aggregatedHealthKitData
+      },
       recentMeals
     };
   } catch (error) {
     console.error('Error gathering user data:', error);
-    return {
-      profile: null,
-      healthData: null,
-      statsData: null,
-      recentActivities: [],
-      dietaryPreferences: null,
-      calorieIntake: null,
-      recentMeals: []
-    };
+    throw error;
   }
-}
+};
 
 // Helper function to analyze question type and intent
-async function analyzeQuestion(message, userData) {
+const analyzeQuestion = async (message, userData) => {
   try {
-    const analysisResponse = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      messages: [
-        {
-          role: "system",
-          content: `Analyze the following question and determine:
-1. Question type (nutrition, fitness, general, etc.)
-2. User intent
-3. Relevant data types needed to answer (choose from: conversation_history, user_profile, health_data, stats_data, dietary_preferences, recent_activities, calorie_intake, recent_meals)
-4. Whether it's related to previous notifications
-5. If it requires specific user data (calories, stats, etc.)`
-        },
-        {
-          role: "user",
-          content: message
-        }
-      ],
-      max_tokens: 200,
-      temperature: 0.3
-    });
+    // Check for health-related keywords (steps only)
+    const healthKeywords = [
+      'step', 'walk', 'run', 'health', 'fitness', 'exercise', 'activity',
+      'steps', 'walking', 'running', 'distance', 'energy', 'workout', 'training'
+    ];
 
-    const analysis = JSON.parse(analysisResponse.choices[0].message.content);
+    // Check for meal-related keywords
+    const mealKeywords = [
+      'meal', 'food', 'eat', 'breakfast', 'lunch', 'dinner', 'snack',
+      'calorie', 'protein', 'carb', 'fat', 'nutrition', 'diet', 'dietary',
+      'intake', 'consumption', 'portion', 'serving', 'recipe', 'cook',
+      'preparation', 'ingredient', 'nutrient', 'vitamin', 'mineral',
+      'macro', 'micro', 'dietary fiber', 'sugar', 'sodium', 'cholesterol'
+    ];
+
+    const messageLower = message.toLowerCase();
+    const isHealthRelated = healthKeywords.some(keyword => messageLower.includes(keyword));
+    const isMealRelated = mealKeywords.some(keyword => messageLower.includes(keyword));
+
+    // Determine relevant data types
+    const relevantDataTypes = ['user_profile', 'health_data', 'stats_data'];
+    if (isHealthRelated) {
+      relevantDataTypes.push('healthkit_data');
+    }
+    if (isMealRelated) {
+      relevantDataTypes.push('meal_data');
+    }
+
+    // Determine question type and intent
+    let type = 'general';
+    let intent = 'information';
+
+    if (isHealthRelated) {
+      type = 'health';
+      if (messageLower.includes('how many') || messageLower.includes('what is my')) {
+        intent = 'metric_query';
+      } else if (messageLower.includes('compare') || messageLower.includes('trend')) {
+        intent = 'comparison';
+      } else if (messageLower.includes('goal') || messageLower.includes('target')) {
+        intent = 'goal_oriented';
+      } else if (messageLower.includes('improve') || messageLower.includes('better')) {
+        intent = 'improvement';
+      }
+    } else if (isMealRelated) {
+      type = 'meal';
+      if (messageLower.includes('what did i eat') || messageLower.includes('what was my')) {
+        intent = 'meal_history';
+      } else if (messageLower.includes('suggest') || messageLower.includes('recommend')) {
+        intent = 'meal_suggestion';
+      } else if (messageLower.includes('track') || messageLower.includes('log')) {
+        intent = 'meal_tracking';
+      } else if (messageLower.includes('analyze') || messageLower.includes('nutrition')) {
+        intent = 'meal_analysis';
+      }
+    }
+
     return {
-      type: analysis.questionType,
-      intent: analysis.intent,
-      relevantDataTypes: analysis.relevantDataTypes,
-      isNotificationRelated: analysis.isNotificationRelated,
-      requiresUserData: analysis.requiresUserData
+      type,
+      intent,
+      relevantDataTypes,
+      isHealthRelated,
+      isMealRelated
     };
   } catch (error) {
     console.error('Error analyzing question:', error);
     return {
       type: 'general',
-      intent: 'unknown',
-      relevantDataTypes: ['conversation_history'],
-      isNotificationRelated: false,
-      requiresUserData: false
+      intent: 'information',
+      relevantDataTypes: ['user_profile'],
+      isHealthRelated: false,
+      isMealRelated: false
     };
   }
-}
+};
 
 // Helper function to fetch notification history
-async function fetchNotificationHistory(userId) {
+const fetchNotificationHistory = async (userId) => {
   try {
     const notifications = await Notification.find({ userId })
       .sort({ timestamp: -1 })
@@ -475,7 +522,116 @@ async function fetchNotificationHistory(userId) {
     console.error('Error fetching notification history:', error);
     return [];
   }
-}
+};
+
+// Enhanced system prompt with better context handling
+const getEnhancedSystemPrompt = async (userData, questionAnalysis) => {
+  return `You are an advanced AI nutrition and fitness assistant with deep expertise in health analytics and personalized guidance. Your role is to provide insightful, data-driven responses that feel natural and conversational while being highly informative.
+
+1. Question Analysis and Response Strategy:
+   - First, analyze the user's question to understand:
+     * The specific information they're seeking
+     * Any implicit questions or concerns
+     * The context and timing of their query
+     * Their current health and nutrition situation
+   - Then, structure your response to:
+     * Address the explicit question directly
+     * Anticipate and answer related questions
+     * Provide context and significance
+     * Offer actionable insights
+
+2. Data Integration and Context:
+   ${userData.healthKitData.latest ? `
+   Latest Step Count:
+   - Steps: ${userData.healthKitData.latest.steps?.count || 0} (Goal: ${userData.healthKitData.latest.steps?.goal || 0})
+   - Progress: ${Math.round(userData.healthKitData.latest.steps?.progress || 0)}%` : ''}
+
+   ${userData.healthKitData.aggregated ? `
+   Last 7 Days Step Summary:
+   - Average Steps: ${Math.round(userData.healthKitData.aggregated.avgSteps || 0)}
+   - Total Steps: ${userData.healthKitData.aggregated.totalSteps || 0}
+   - Average Progress: ${Math.round(userData.healthKitData.aggregated.avgProgress || 0)}%` : ''}
+
+   ${userData.recentMeals && userData.recentMeals.length > 0 ? `
+   Recent Meals (Last 5):
+   ${userData.recentMeals.map((meal, index) => `
+   ${index + 1}. ${meal.type}: ${meal.name}
+      - Time: ${new Date(meal.date).toLocaleTimeString()}
+      - Calories: ${meal.calories} kcal
+      - Protein: ${meal.protein}g
+      - Carbs: ${meal.carbs}g
+      - Fat: ${meal.fat}g`).join('\n')}` : ''}
+
+3. Response Framework:
+   Your response should follow this structure based on the question type:
+
+   For Step Count Questions:
+   a) Direct Answer:
+      - Current step count and progress
+      - Comparison with daily goal
+      - Recent trend analysis
+   
+   b) Context and Analysis:
+      - Weekly average comparison
+      - Progress towards goals
+      - Notable patterns or changes
+   
+   c) Recommendations:
+      - Suggestions for improvement
+      - Tips for increasing activity
+      - Goal adjustment if needed
+
+   For Meal History Questions:
+   a) Direct Answer:
+      - List of recent meals with details
+      - Total calories and macros
+      - Meal timing patterns
+   
+   b) Nutritional Analysis:
+      - Macro distribution
+      - Meal balance assessment
+      - Dietary pattern insights
+   
+   c) Recommendations:
+      - Meal timing suggestions
+      - Nutritional balance tips
+      - Portion size guidance
+
+4. Response Style Guidelines:
+   - Be conversational but professional
+   - Use natural language to explain data
+   - Break down complex information into digestible parts
+   - Use analogies or comparisons when helpful
+   - Maintain a supportive and encouraging tone
+   - Be precise with numbers but explain their significance
+   - Avoid medical advice unless explicitly requested
+
+5. Question Analysis Details:
+   - Type: ${questionAnalysis.type}
+   - Intent: ${questionAnalysis.intent}
+   - Relevant Data Types: ${questionAnalysis.relevantDataTypes.join(', ')}
+
+6. Quality Requirements:
+   - Accuracy: Double-check all numbers and calculations
+   - Relevance: Focus on information that directly answers the question
+   - Completeness: Address both explicit and implicit aspects of the question
+   - Clarity: Use clear, simple language to explain complex data
+   - Actionability: Provide specific, implementable recommendations
+   - Context: Connect with user's history and goals
+   - Natural Flow: Make the response feel like a natural conversation
+
+Remember to:
+1. Think step by step about what the user is really asking
+2. Consider both the explicit question and implicit concerns
+3. Use the available data to provide specific, personalized insights
+4. Explain the significance of the data in simple terms
+5. Provide actionable recommendations when appropriate
+6. Maintain a natural, conversational tone
+7. Connect the response with previous interactions when relevant
+8. Anticipate and address potential follow-up questions
+
+Your goal is to make the user feel like they're talking to a knowledgeable health and nutrition expert who understands their specific situation and can provide personalized, actionable insights.`;
+};
 
 module.exports = {
   initializeChatTable,
