@@ -4,8 +4,14 @@ const Chat = require('../models/Chat');
 const fs = require('fs');
 const path = require('path');
 const { logRequest, logResponse, logError } = require('../utils/debugLogger');
-const { findSimilarMessages } = require('./embeddingService');
+const { findSimilarMessages, processMessageEmbedding } = require('./embeddingService');
 const foodService = require('./foodService');
+const User = require('../models/User');
+const HealthData = require('../models/HealthData');
+const StatsData = require('../models/StatsData');
+const ActivityData = require('../models/ActivityData');
+const DietaryPreferences = require('../models/DietaryPreferences');
+const Notification = require('../models/Notification');
 
 // Initialize ClickHouse client
 const client = createClient({
@@ -33,7 +39,7 @@ const initializeChatTable = async () => {
     `,
   });
   console.log("Table 'chat_history' initialized.");
-  
+
   // Check if conversation_id column exists, add it if not
   try {
     await client.query({
@@ -57,14 +63,14 @@ const insertChatRecord = async (userMessage, aiResponse, conversationId = null) 
     .replace(/^#+\s+/gm, '')         // Remove heading markers
     .replace(/^[-*+]\s+/gm, '')      // Remove bullet points
     .replace(/`([^`]+)`/g, '$1');    // Remove code formatting
-    
+
   const cleanAiResponse = aiResponse
     .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold formatting
     .replace(/\*(.*?)\*/g, '$1')     // Remove italic formatting
     .replace(/^#+\s+/gm, '')         // Remove heading markers
     .replace(/^[-*+]\s+/gm, '')      // Remove bullet points
     .replace(/`([^`]+)`/g, '$1');    // Remove code formatting
-    
+
   await client.insert({
     table: 'chat_history',
     values: [
@@ -83,13 +89,13 @@ const insertChatRecord = async (userMessage, aiResponse, conversationId = null) 
 // Fetch chat history
 const fetchChatHistory = async (conversationId = null) => {
   let query = 'SELECT * FROM chat_history';
-  
+
   if (conversationId) {
     query += ` WHERE conversation_id = '${conversationId}'`;
   }
-  
+
   query += ' ORDER BY timestamp ASC'; // Order chronologically for proper conversation flow
-  
+
   const rows = await client.query({
     query,
     format: 'JSONEachRow',
@@ -112,12 +118,125 @@ const chatService = {
           hasImage: !!options.imageUrl
         }
       });
-      
-      // System prompt that defines the AI's behavior - simplified for faster responses
-      const systemPrompt = "You are a nutrition and fitness assistant. Keep responses brief and helpful. When food analysis data is provided, include it in your response. Reference previous conversations when relevant. Be friendly and conversational. Avoid special formatting characters. Provide practical advice that helps users improve their nutrition and fitness.";
-      
-      let imageContent = '';
-      let foodAnalysisResult = null;
+
+      // 1. Gather all user data
+      const userData = await gatherUserData(userId);
+
+      // 2. Analyze the question type and intent
+      const questionAnalysis = await analyzeQuestion(message, userData);
+
+      // 3. Prepare metadata for vector storage
+      const messageMetadata = {
+        message_type: options.isNotificationQuestion ? 'notification_question' : 'chat',
+        source: options.fromNotification ? 'notification' : 'chat',
+        has_image: options.imageUrl ? 'true' : 'false',
+        parent_message_id: options.parentMessageId || '',
+        conversation_type: options.conversationId ? 'thread' : 'new',
+        timestamp: new Date().toISOString(),
+        question_type: questionAnalysis.type,
+        question_intent: questionAnalysis.intent,
+        relevant_data_types: questionAnalysis.relevantDataTypes
+      };
+
+      // 4. Prepare comprehensive context for vector storage
+      const messageContext = {
+        user_id: userId,
+        conversation_id: options.conversationId || '',
+        environment: process.env.NODE_ENV || 'development',
+        platform: 'mobile',
+        version: process.env.APP_VERSION || '1.0.0',
+        user_profile: userData.profile,
+        health_data: userData.healthData,
+        stats_data: userData.statsData,
+        dietary_preferences: userData.dietaryPreferences,
+        recent_activities: userData.recentActivities,
+        meal_data: userData.mealData
+      };
+
+      // 5. Enhanced system prompt with comprehensive context
+      const systemPrompt = `You are a nutrition and fitness assistant with access to comprehensive user data and conversation history.
+
+IMPORTANT: When users ask about their meals, calorie counts, or nutrition data, ALWAYS include the relevant meal data in your response. If a user asks about their calorie count for today or the past week, you MUST provide this information from the meal data provided below.
+
+1. Data Integration and Context:
+   - User Profile: ${JSON.stringify(userData.profile)}
+   - Health Data: ${JSON.stringify(userData.healthData)}
+   - Stats Data: ${JSON.stringify(userData.statsData)}
+   - Dietary Preferences: ${JSON.stringify(userData.dietaryPreferences)}
+   - Recent Activities: ${JSON.stringify(userData.recentActivities)}
+
+2. MEAL DATA (CRITICAL FOR NUTRITION QUESTIONS):
+   - Recent Meals (last 7 days): ${JSON.stringify(userData.mealData.recentMeals)}
+   - Daily Calorie Summary: ${JSON.stringify(userData.mealData.dailySummary)}
+   - Average Daily Calories: ${userData.mealData.averageDailyCalories}
+   - Total Calories Last Week: ${userData.mealData.totalCaloriesLastWeek}
+
+3. Conversation Context:
+   - Previous Conversations: ${JSON.stringify(await fetchChatHistory(options.conversationId))}
+   - Notification History: ${JSON.stringify(await fetchNotificationHistory(userId))}
+
+4. Question Analysis:
+   - Type: ${questionAnalysis.type}
+   - Intent: ${questionAnalysis.intent}
+   - Relevant Data Types: ${questionAnalysis.relevantDataTypes.join(', ')}
+   - Is Meal Related: ${questionAnalysis.isMealRelated}
+   - Context: ${questionAnalysis.context || 'general'}
+
+5. MEAL DATA INSTRUCTIONS (CRITICAL):
+   - When asked about meals or calories, ALWAYS include specific meal data in your response
+   - For "recent meals" questions, list the most recent meals with dates, types, and calories
+   - For "calorie count" questions, provide exact numbers from the meal data
+   - For "today's calories" or "yesterday's calories", use the most recent day in the data
+   - For "last 7 days calories", list the daily calorie totals from the dailySummary
+   - ALWAYS mention the average daily calorie count when discussing calorie trends
+   - When asked about nutrition improvements, compare current intake to dietary goals
+
+6. Response Guidelines:
+   - Combine user data with general nutrition/fitness knowledge
+   - Reference specific metrics from user's history
+   - Connect current question with previous interactions
+   - Consider notification context if applicable
+   - Maintain conversation flow and context
+   - Provide actionable, personalized advice
+   - Use both specific user data and general knowledge
+   - Keep responses concise but comprehensive
+
+7. Data Integration Strategy:
+   - Primary Data Sources:
+     * User's personal metrics and history
+     * Previous conversation context
+     * Notification questions and responses
+     * Recent activities and progress
+     * Meal data and calorie information
+   - Secondary Knowledge:
+     * General nutrition principles
+     * Fitness best practices
+     * Health guidelines
+     * Scientific research
+
+8. Context Awareness:
+   - Track conversation threads
+   - Reference previous notification questions
+   - Consider user's progress over time
+   - Maintain awareness of user's goals
+   - Connect related topics across conversations
+
+9. Response Structure:
+   - Acknowledge user's specific situation
+   - Reference relevant historical data
+   - Provide personalized advice
+   - Include actionable next steps
+   - Connect with previous interactions
+   - Maintain conversation continuity
+
+Remember to:
+1. ALWAYS include meal data when responding to nutrition questions
+2. Reference specific data points when relevant
+3. Connect current questions with past interactions
+4. Balance personal data with general knowledge
+5. Maintain conversation flow and context
+6. Provide practical, actionable advice`;
+
       // Initialize messages array with system message
       const messages = [
         {
@@ -126,335 +245,420 @@ const chatService = {
         }
       ];
 
-      // If there's an image, analyze it first
-      if (options.imageUrl) {
-        console.log('\n==== IMAGE ANALYSIS ATTEMPT ====');
-        console.log('Image URL:', options.imageUrl);
-        try {
-          // Debug: Log image processing
-          logRequest(`${ENDPOINT_SERVICE}/image-analysis`, {
-            imagePath: options.imageUrl
-          });
-          
-          // Handle both relative and absolute paths
-          let imagePath;
-          
-          // If the path is already absolute, use it directly
-          if (options.imageUrl.startsWith('/') || options.imageUrl.includes(':/')) {
-            imagePath = options.imageUrl;
-          } else {
-            // Otherwise, construct the path based on environment
-            if (process.env.NODE_ENV === 'production') {
-              // In production, use path relative to the root directory
-              imagePath = path.join(process.cwd(), options.imageUrl);
-            } else {
-              // In development, use the absolute path
-              imagePath = path.join('d:/freelance_project/ai-nutrition-backend', options.imageUrl);
-            }
-          }
-          
-          console.log(`Reading image file from: ${imagePath}`);
-          
-          // Check if file exists
-          if (!fs.existsSync(imagePath)) {
-            console.error(`Image file does not exist at path: ${imagePath}`);
-            console.log('Trying alternative path...');
-            
-            // Try an alternative path
-            const altPath = path.join(process.cwd(), options.imageUrl.replace(/^\//, ''));
-            console.log(`Trying alternative path: ${altPath}`);
-            
-            if (fs.existsSync(altPath)) {
-              imagePath = altPath;
-              console.log(`Found image at alternative path: ${imagePath}`);
-            } else {
-              throw new Error('Image file not found');
-            }
-          }
-          
-          const imageBuffer = fs.readFileSync(imagePath);
-          console.log(`Image buffer size: ${imageBuffer.length} bytes`);
-          
-          // Use the food service to analyze the image
-          console.log('Calling food service to analyze image...');
-          try {
-            foodAnalysisResult = await foodService.analyzeFood(imageBuffer);
-            console.log('Food analysis result:', JSON.stringify(foodAnalysisResult));
-          } catch (foodError) {
-            console.error('Error in food analysis:', foodError);
-            // We'll continue with the Vision API below
-          }
-          
-          if (foodAnalysisResult && !foodAnalysisResult.error) {
-            // Format the food analysis result into a readable message
-            const foodItems = foodAnalysisResult.foodItems;
-            let analysisText = "I've analyzed your food image and identified the following items:\n\n";
-            
-            foodItems.forEach(item => {
-              analysisText += `${item.name}: ${item.calories} calories per 100g. `;
-              analysisText += `Contains ${item.protein}g protein, ${item.carbs}g carbs, ${item.fat}g fat, and ${item.fiber}g fiber. `;
-              analysisText += `This food is generally considered ${item.isHealthy ? 'healthy' : 'less healthy'}.\n\n`;
-            });
-            
-            analysisText += `Total estimated calories: ${foodAnalysisResult.totalCalories}`;
-            
-            imageContent = analysisText;
-          } else {
-            // Fall back to Vision API
-            console.log('Food analysis failed or returned an error, falling back to Vision API');
-            const base64Image = imageBuffer.toString('base64');
-            
-            // Debug: Log OpenAI Vision API call
-            logRequest(`${ENDPOINT_SERVICE}/vision-api`, {
-              model: "gpt-4-vision-preview",
-              imageSize: Math.round(base64Image.length / 1024) + 'KB'
-            });
-
-            // Get image description from OpenAI Vision API
-            const visionResponse = await openai.chat.completions.create({
-              model: "gpt-4-vision-preview",
-              messages: [
-                {
-                  role: "user",
-                  content: [
-                    {
-                      type: "text",
-                      text: "Analyze this food image in detail. Describe what you see, identify the foods, estimate nutritional content, and suggest any health considerations. Be thorough in your analysis."
-                    },
-                    {
-                      type: "image_url",
-                      image_url: {
-                        url: `data:image/jpeg;base64,${base64Image}`
-                      }
-                    }
-                  ]
-                }
-              ],
-              max_tokens: 500
-            });
-            
-            // Debug: Log Vision API response
-            logResponse(`${ENDPOINT_SERVICE}/vision-api`, {
-              responseLength: visionResponse.choices[0].message.content.length,
-              preview: visionResponse.choices[0].message.content.substring(0, 50) + '...',
-              usage: visionResponse.usage
-            });
-
-            imageContent = visionResponse.choices[0].message.content;
-          }
-          
-          console.log(`Image analysis: ${imageContent.substring(0, 100)}...`);
-          
-          // Add image analysis as a system message
+      // 6. Add relevant historical data based on question analysis
+      if (questionAnalysis.relevantDataTypes.includes('conversation_history')) {
+        const history = await fetchChatHistory(options.conversationId);
+        if (history.length > 0) {
           messages.push({
             role: "system",
-            content: `I've analyzed the image the user shared. Here's what I can see: ${imageContent}`
+            content: "Relevant conversation history:"
           });
-          
-          // Don't add a direct assistant message about the image - we'll let the model generate a complete response
-        } catch (imageError) {
-          // Debug: Log image processing error
-          console.error('Error processing image:', imageError);
-          logError(`${ENDPOINT_SERVICE}/image-analysis`, imageError);
-          
-          // Continue without image analysis
-          messages.push({
-            role: "assistant",
-            content: "I notice you've shared an image, but I couldn't analyze it properly. Let me still try to help with your question."
-          });
-        }
-      }
-
-      // Get conversation history if this is part of a thread
-      if (options.conversationId) {
-        try {
-          // Debug: Log conversation history retrieval
-          logRequest(`${ENDPOINT_SERVICE}/conversation-history`, {
-            conversationId: options.conversationId
-          });
-          
-          const history = await Chat.find({
-            conversationId: options.conversationId,
-            createdAt: { 
-              $lt: new Date() 
-            }
-          })
-          .sort({ createdAt: 1 }) // Sort in chronological order (oldest first)
-          .limit(15)  // Limit to 15 messages for context
-          .lean();
-          
-          // Debug: Log history retrieval results
-          logResponse(`${ENDPOINT_SERVICE}/conversation-history`, {
-            messageCount: history.length,
-            messageTypes: history.map(msg => msg.isAI ? 'AI' : 'User')
-          });
-
-          if (history.length > 0) {
-            // Add each message from history to the messages array with proper role
-            history.forEach(msg => {
-              messages.push({
-                role: msg.isAI ? "assistant" : "user",
-                content: msg.message
-              });
-            });
-          }
-        } catch (historyError) {
-          // Debug: Log history retrieval error
-          logError(`${ENDPOINT_SERVICE}/conversation-history`, historyError);
-          
-          // Add a note about missing history
-          messages.push({
-            role: "system",
-            content: "Note: Unable to retrieve conversation history. Responding based on current message only."
-          });
-        }
-      }
-
-      // Find relevant previous messages using vector search
-      try {
-        logRequest(`${ENDPOINT_SERVICE}/vector-search`, {
-          userId,
-          messagePreview: message.substring(0, 50) + (message.length > 50 ? '...' : '')
-        });
-        
-        const similarMessages = await findSimilarMessages(userId, message, 3);
-        
-        logResponse(`${ENDPOINT_SERVICE}/vector-search`, {
-          count: similarMessages.length,
-          messages: similarMessages.map(m => ({
-            similarity: m.similarity,
-            isAI: m.is_ai,
-            preview: m.message.substring(0, 30) + '...'
-          }))
-        });
-        
-        // If we found similar messages, add them as context
-        if (similarMessages.length > 0) {
-          // Add a system message explaining the context
-          messages.push({
-            role: "system",
-            content: "I found some relevant information from your previous conversations that might help with your current question:"
-          });
-          
-          // Add each similar message with its context
-          similarMessages.forEach(m => {
+          history.forEach(msg => {
             messages.push({
-              role: m.is_ai ? "assistant" : "user",
-              content: m.message
+              role: msg.isAI ? "assistant" : "user",
+              content: msg.message
             });
           });
-          
-          // Add a separator
+        }
+      }
+
+      // 7. Add notification history if relevant
+      if (questionAnalysis.isNotificationRelated) {
+        const notificationHistory = await fetchNotificationHistory(userId);
+        if (notificationHistory.length > 0) {
           messages.push({
             role: "system",
-            content: "Now, let me address your current question specifically."
+            content: "Relevant notification history:"
+          });
+          notificationHistory.forEach(notification => {
+            messages.push({
+              role: "system",
+              content: `Notification: ${notification.question}\nResponse: ${notification.answer}`
+            });
           });
         }
-      } catch (vectorError) {
-        // Log error but continue without vector search results
-        logError(`${ENDPOINT_SERVICE}/vector-search`, vectorError);
       }
-      
-      // Add the current user message, including reference to the image if one was uploaded
-      if (options.imageUrl) {
-        messages.push({
-          role: "user",
-          content: `${message} (I've also shared an image for you to analyze)`
-        });
-      } else {
-        messages.push({
-          role: "user",
-          content: message
-        });
-      }
-      
-      // If we have food analysis, make sure it's prominently included in the system message
-      if (foodAnalysisResult && !foodAnalysisResult.error) {
-        // Add a specific system message about the food analysis
+
+      // 8. Add similar messages from vector search
+      const similarMessages = await findSimilarMessages(userId, message, 3);
+      if (similarMessages.length > 0) {
         messages.push({
           role: "system",
-          content: `IMPORTANT: The user has shared an image of food. Your analysis MUST include the following nutritional information: ${JSON.stringify(foodAnalysisResult, null, 2)}`
+          content: "Similar previous interactions:"
+        });
+        similarMessages.forEach(m => {
+          messages.push({
+            role: m.is_ai ? "assistant" : "user",
+            content: m.message
+          });
         });
       }
-      
-      // Debug: Log messages array
-      logRequest(`${ENDPOINT_SERVICE}/openai-completion`, {
-        model: "gpt-4-turbo-preview",
-        messagesCount: messages.length,
-        preview: JSON.stringify(messages).substring(0, 100) + '...'
+
+      // 9. Add the current user message with context
+      messages.push({
+        role: "user",
+        content: message
       });
 
-      // Get AI response with proper conversation context - use faster model for better UX
+      // 10. Get AI response with comprehensive context
       const response = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo", // Use faster model for quicker responses
+        model: "gpt-3.5-turbo",
         messages: messages,
         max_tokens: 500,
         temperature: 0.7
       });
-      
-      // Debug: Log OpenAI response
-      logResponse(`${ENDPOINT_SERVICE}/openai-completion`, {
-        responseLength: response.choices[0].message.content.length,
-        preview: response.choices[0].message.content.substring(0, 50) + '...',
-        usage: response.usage
-      });
 
-      // Process the response to ensure no special characters
+      // Process and clean the response
       let cleanedResponse = response.choices[0].message.content.trim();
-      
-      // Remove any markdown formatting if present (*, #, etc.)
       cleanedResponse = cleanedResponse
-        .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold formatting
-        .replace(/\*(.*?)\*/g, '$1')     // Remove italic formatting
-        .replace(/^#+\s+/gm, '')         // Remove heading markers
-        .replace(/^[-*+]\s+/gm, '• ')    // Replace bullet points with a simple bullet
-        .replace(/`([^`]+)`/g, '$1');    // Remove code formatting
-      
-      // If we have food analysis, include it in the response
-      if (foodAnalysisResult && !foodAnalysisResult.error) {
-        // Generate a food analysis response
-        let foodAnalysis = `I've analyzed your food image and identified the following:\n\n`;
-        
-        foodAnalysisResult.foodItems.forEach(item => {
-          foodAnalysis += `• ${item.name}: ${item.calories} calories per 100g serving\n`;
-          foodAnalysis += `  - Protein: ${item.protein}g\n`;
-          foodAnalysis += `  - Carbs: ${item.carbs}g\n`;
-          foodAnalysis += `  - Fat: ${item.fat}g\n`;
-          foodAnalysis += `  - Fiber: ${item.fiber}g\n`;
-          foodAnalysis += `  - Health assessment: ${item.isHealthy ? 'Healthy choice' : 'Less healthy option'}\n\n`;
-        });
-        
-        foodAnalysis += `Total estimated calories: ${foodAnalysisResult.totalCalories}\n\n`;
-        
-        // Combine AI response with food analysis
-        cleanedResponse = foodAnalysis + cleanedResponse;
-      }
+        .replace(/\*\*(.*?)\*\*/g, '$1')
+        .replace(/\*(.*?)\*/g, '$1')
+        .replace(/^#+\s+/gm, '')
+        .replace(/^[-*+]\s+/gm, '• ')
+        .replace(/`([^`]+)`/g, '$1');
 
-      const result = {
+      // Store the interaction in vector database
+      await processMessageEmbedding(
+        userId,
+        options.conversationId,
+        options.messageId || Date.now().toString(),
+        message,
+        false,
+        messageMetadata,
+        messageContext
+      );
+
+      await processMessageEmbedding(
+        userId,
+        options.conversationId,
+        (Date.now() + 1).toString(),
+        cleanedResponse,
+        true,
+        {
+          ...messageMetadata,
+          response_to_message_id: options.messageId || '',
+          response_type: 'ai_assistant',
+          response_quality: 'high'
+        },
+        {
+          ...messageContext,
+          response_context: JSON.stringify({
+            model: 'gpt-3.5-turbo',
+            temperature: 0.7,
+            max_tokens: 500
+          })
+        }
+      );
+
+      return {
         message: cleanedResponse,
-        imageAnalysis: imageContent || null,
-        foodAnalysis: foodAnalysisResult || null
+        questionAnalysis,
+        relevantData: {
+          userProfile: userData.profile,
+          healthData: userData.healthData,
+          statsData: userData.statsData,
+          mealData: userData.mealData
+        }
       };
-      
-      // Debug: Log final result
-      logResponse(ENDPOINT_SERVICE, {
-        messageLength: result.message.length,
-        hasImageAnalysis: !!result.imageAnalysis,
-        imageAnalysisLength: result.imageAnalysis ? result.imageAnalysis.length : 0,
-        hasFoodAnalysis: !!result.foodAnalysis
-      });
-      
-      return result;
+
     } catch (error) {
       console.error('Error in processMessage:', error);
-      
-      // Debug: Log service error
       logError(ENDPOINT_SERVICE, error);
-      
       throw error;
     }
   }
 };
+
+// Helper function to gather all user data
+async function gatherUserData(userId) {
+  try {
+    // Fetch user profile
+    const userProfile = await User.findById(userId);
+
+    // Fetch health data
+    const healthData = await HealthData.findOne({ userId });
+
+    // Fetch stats data
+    const statsData = await StatsData.findOne({ userId });
+
+    // Fetch recent activities
+    const recentActivities = await ActivityData.find({ userId })
+      .sort({ timestamp: -1 })
+      .limit(10);
+
+    // Fetch dietary preferences
+    const dietaryPreferences = await DietaryPreferences.findOne({ userId });
+
+    // Fetch recent meals (last 7 days)
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const Meal = require('../models/Meal');
+    const recentMeals = await Meal.find({
+      userId,
+      date: { $gte: sevenDaysAgo }
+    }).sort({ date: -1 }).limit(10);
+
+    // Calculate daily calorie averages
+    const mealsByDate = {};
+    recentMeals.forEach(meal => {
+      const dateKey = meal.date.toISOString().split('T')[0];
+      if (!mealsByDate[dateKey]) {
+        mealsByDate[dateKey] = [];
+      }
+      mealsByDate[dateKey].push(meal);
+    });
+
+    // Calculate calories by date
+    const caloriesByDate = {};
+    Object.keys(mealsByDate).forEach(date => {
+      caloriesByDate[date] = mealsByDate[date].reduce(
+        (sum, meal) => sum + meal.totalCalories, 0
+      );
+    });
+
+    // Calculate average daily calories
+    const totalDays = Object.keys(caloriesByDate).length;
+    const totalCalories = Object.values(caloriesByDate).reduce((sum, cal) => sum + cal, 0);
+    const averageDailyCalories = totalDays > 0 ? Math.round(totalCalories / totalDays) : 0;
+
+    // Create a daily summary
+    const dailySummary = Object.keys(mealsByDate).map(date => ({
+      date,
+      totalCalories: caloriesByDate[date],
+      mealCount: mealsByDate[date].length,
+      meals: mealsByDate[date].map(meal => ({
+        id: meal._id.toString(),
+        mealType: meal.mealType,
+        totalCalories: meal.totalCalories,
+        foodItems: meal.foodItems.map(item => ({
+          name: item.name,
+          calories: item.calories,
+          protein: item.protein,
+          carbs: item.carbs,
+          fat: item.fat,
+          fiber: item.fiber,
+          isHealthy: item.isHealthy
+        }))
+      }))
+    })).sort((a, b) => new Date(b.date) - new Date(a.date));
+
+    return {
+      profile: userProfile,
+      healthData,
+      statsData,
+      recentActivities,
+      dietaryPreferences,
+      mealData: {
+        recentMeals: recentMeals.map(meal => ({
+          id: meal._id.toString(),
+          date: meal.date,
+          mealType: meal.mealType,
+          totalCalories: meal.totalCalories,
+          foodItems: meal.foodItems.map(item => ({
+            name: item.name,
+            calories: item.calories,
+            protein: item.protein,
+            carbs: item.carbs,
+            fat: item.fat,
+            fiber: item.fiber,
+            isHealthy: item.isHealthy
+          }))
+        })),
+        dailySummary,
+        averageDailyCalories,
+        totalCaloriesLastWeek: totalCalories
+      }
+    };
+  } catch (error) {
+    console.error('Error gathering user data:', error);
+    return {
+      profile: null,
+      healthData: null,
+      statsData: null,
+      recentActivities: [],
+      dietaryPreferences: null,
+      mealData: {
+        recentMeals: [],
+        dailySummary: [],
+        averageDailyCalories: 0,
+        totalCaloriesLastWeek: 0
+      }
+    };
+  }
+}
+
+// Helper function to analyze question type and intent
+async function analyzeQuestion(message, userData) {
+  try {
+    // First, check for common meal-related queries using regex patterns
+    const mealPatterns = [
+      /recent\s+(\d+)?\s*meals/i,
+      /last\s+(\d+)?\s*meals/i,
+      /what\s+(did|have)\s+I\s+(eat|had|consumed)/i,
+      /calorie\s+count/i,
+      /calories?\s+(of|for|in|from)/i,
+      /average\s+calorie/i,
+      /total\s+calories/i,
+      /meal\s+history/i,
+      /nutrition\s+summary/i,
+      /food\s+log/i,
+      /diet\s+summary/i,
+      /what\s+I\s+(ate|consumed|had)/i,
+      /today'?s\s+calories?/i,
+      /yesterday'?s\s+calories?/i,
+      /calories?\s+yesterday/i,
+      /calories?\s+today/i,
+      /calories?\s+count/i,
+      /calories?\s+intake/i,
+      /calories?\s+consumed/i,
+      /calories?\s+eaten/i,
+      /calories?\s+burned/i,
+      /calories?\s+last\s+(\d+)?\s*days?/i,
+      /calories?\s+week/i,
+      /week'?s?\s+calories?/i,
+      /improve\s+nutrition/i,
+      /improve\s+diet/i,
+      /improve\s+eating/i,
+      /improve\s+calories?/i,
+      /improve\s+meal/i
+    ];
+
+    const isMealQuery = mealPatterns.some(pattern => pattern.test(message));
+
+    if (isMealQuery) {
+      // For meal-related queries, return a specialized analysis
+      return {
+        type: 'nutrition',
+        intent: 'get_meal_data',
+        relevantDataTypes: ['meal_history', 'calorie_data', 'nutrition_data'],
+        isNotificationRelated: false,
+        requiresUserData: true,
+        isMealRelated: true
+      };
+    }
+
+    // For other queries, use a simpler approach without JSON parsing
+    // Directly analyze the message content
+    const messageLower = message.toLowerCase();
+
+    // Determine question type
+    let questionType = 'general';
+    if (messageLower.includes('meal') || messageLower.includes('food') ||
+        messageLower.includes('eat') || messageLower.includes('calorie') ||
+        messageLower.includes('nutrition')) {
+      questionType = 'nutrition';
+    } else if (messageLower.includes('exercise') || messageLower.includes('workout') ||
+               messageLower.includes('activity') || messageLower.includes('steps')) {
+      questionType = 'fitness';
+    } else if (messageLower.includes('weight') || messageLower.includes('height') ||
+               messageLower.includes('bmi') || messageLower.includes('profile')) {
+      questionType = 'profile';
+    }
+
+    // Determine intent
+    let intent = 'get_information';
+    if (messageLower.includes('how') || messageLower.includes('what') ||
+        messageLower.includes('why') || messageLower.includes('when')) {
+      intent = 'get_information';
+    } else if (messageLower.includes('add') || messageLower.includes('create') ||
+               messageLower.includes('log') || messageLower.includes('record')) {
+      intent = 'add_data';
+    } else if (messageLower.includes('update') || messageLower.includes('change') ||
+               messageLower.includes('modify')) {
+      intent = 'update_data';
+    }
+
+    // Determine relevant data types
+    const relevantDataTypes = [];
+    if (messageLower.includes('meal') || messageLower.includes('food') ||
+        messageLower.includes('eat') || messageLower.includes('calorie') ||
+        messageLower.includes('nutrition')) {
+      relevantDataTypes.push('meal_data');
+    }
+    if (messageLower.includes('exercise') || messageLower.includes('workout') ||
+        messageLower.includes('activity') || messageLower.includes('steps')) {
+      relevantDataTypes.push('activity_data');
+    }
+    if (messageLower.includes('weight') || messageLower.includes('height') ||
+        messageLower.includes('bmi') || messageLower.includes('profile')) {
+      relevantDataTypes.push('profile_data');
+    }
+    if (relevantDataTypes.length === 0) {
+      relevantDataTypes.push('conversation_history');
+    }
+
+    // Determine if notification related
+    const isNotificationRelated = messageLower.includes('notification') ||
+                                 messageLower.includes('alert') ||
+                                 messageLower.includes('reminder');
+
+    // Determine if requires user data
+    const requiresUserData = messageLower.includes('my') ||
+                            messageLower.includes('me') ||
+                            messageLower.includes('i') ||
+                            messageLower.includes('mine');
+
+    // Determine if meal related
+    const isMealRelated = messageLower.includes('meal') ||
+                         messageLower.includes('food') ||
+                         messageLower.includes('eat') ||
+                         messageLower.includes('calorie') ||
+                         messageLower.includes('nutrition');
+
+    // Create analysis object
+    const analysis = {
+      questionType,
+      intent,
+      relevantDataTypes,
+      isNotificationRelated,
+      requiresUserData,
+      isMealRelated
+    };
+
+    return {
+      type: analysis.questionType || 'general',
+      intent: analysis.intent || 'unknown',
+      relevantDataTypes: analysis.relevantDataTypes || ['conversation_history'],
+      isNotificationRelated: analysis.isNotificationRelated || false,
+      requiresUserData: analysis.requiresUserData || false,
+      isMealRelated: analysis.isMealRelated || false
+    };
+  } catch (error) {
+    console.error('Error analyzing question:', error);
+    return {
+      type: 'general',
+      intent: 'unknown',
+      relevantDataTypes: ['conversation_history'],
+      isNotificationRelated: false,
+      requiresUserData: false,
+      isMealRelated: message.toLowerCase().includes('meal') ||
+                    message.toLowerCase().includes('food') ||
+                    message.toLowerCase().includes('eat') ||
+                    message.toLowerCase().includes('calorie')
+    };
+  }
+}
+
+// Helper function to fetch notification history
+async function fetchNotificationHistory(userId) {
+  try {
+    const notifications = await Notification.find({ userId })
+      .sort({ timestamp: -1 })
+      .limit(10)
+      .lean();
+
+    return notifications.map(notification => ({
+      question: notification.question,
+      answer: notification.answer,
+      timestamp: notification.timestamp,
+      type: notification.type
+    }));
+  } catch (error) {
+    console.error('Error fetching notification history:', error);
+    return [];
+  }
+}
 
 module.exports = {
   initializeChatTable,

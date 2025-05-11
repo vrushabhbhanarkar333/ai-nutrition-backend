@@ -28,25 +28,25 @@ const ENDPOINT_SERVICE = 'embeddingService';
 const initializeVectorTable = async () => {
   try {
     console.log("Initializing chat_embeddings table...");
-    
+
     // First, check if the table exists
     const tableExists = await client.query({
       query: `
-        SELECT name 
-        FROM system.tables 
-        WHERE database = currentDatabase() 
+        SELECT name
+        FROM system.tables
+        WHERE database = currentDatabase()
         AND name = 'chat_embeddings'
       `,
       format: 'JSONEachRow'
     });
-    
+
     const tableExistsResult = await tableExists.json();
-    
+
     // If table doesn't exist, create it
     if (tableExistsResult.length === 0) {
       console.log("Creating chat_embeddings table...");
-      
-      // Create vector table
+
+      // Create vector table with enhanced metadata
       await client.query({
         query: `
           CREATE TABLE IF NOT EXISTS chat_embeddings (
@@ -55,30 +55,50 @@ const initializeVectorTable = async () => {
             conversation_id String,
             message_id String,
             message String,
-            is_ai UInt8, -- Using UInt8 instead of Boolean for better compatibility
+            is_ai UInt8,
             embedding Array(Float32),
-            timestamp DateTime64(3) DEFAULT now64(3)
+            timestamp DateTime64(3) DEFAULT now64(3),
+            metadata Map(String, String),
+            context Map(String, String),
+            parent_message_id Nullable(String),
+            response_to_message_id Nullable(String),
+            message_type String DEFAULT 'chat',
+            sentiment Float32 DEFAULT 0.0,
+            topic String DEFAULT '',
+            keywords Array(String) DEFAULT [],
+            language String DEFAULT 'en'
           ) ENGINE = MergeTree()
           ORDER BY (user_id, conversation_id, timestamp)
         `,
       });
-      
+
       console.log("Table 'chat_embeddings' created successfully.");
     } else {
       console.log("Table 'chat_embeddings' already exists.");
-      
-      // Verify table structure
-      console.log("Verifying table structure...");
-      const tableStructure = await client.query({
-        query: `DESCRIBE TABLE chat_embeddings`,
-        format: 'JSONEachRow'
-      });
-      
-      const structure = await tableStructure.json();
-      console.log("Table structure:", JSON.stringify(structure, null, 2));
+
+      // Add new columns if they don't exist
+      try {
+        await client.query({
+          query: `
+            ALTER TABLE chat_embeddings
+            ADD COLUMN IF NOT EXISTS metadata Map(String, String),
+            ADD COLUMN IF NOT EXISTS context Map(String, String),
+            ADD COLUMN IF NOT EXISTS parent_message_id Nullable(String),
+            ADD COLUMN IF NOT EXISTS response_to_message_id Nullable(String),
+            ADD COLUMN IF NOT EXISTS message_type String DEFAULT 'chat',
+            ADD COLUMN IF NOT EXISTS sentiment Float32 DEFAULT 0.0,
+            ADD COLUMN IF NOT EXISTS topic String DEFAULT '',
+            ADD COLUMN IF NOT EXISTS keywords Array(String) DEFAULT [],
+            ADD COLUMN IF NOT EXISTS language String DEFAULT 'en'
+          `
+        });
+        console.log("Added new columns to chat_embeddings table.");
+      } catch (alterError) {
+        console.error("Error adding new columns:", alterError);
+      }
     }
-    
-    // Test the table with a simple insert
+
+    // Test the table with a sample insert
     console.log("Testing chat_embeddings table with a sample insert...");
     try {
       await client.insert({
@@ -90,25 +110,23 @@ const initializeVectorTable = async () => {
           message: 'This is a test message',
           is_ai: 0,
           embedding: [0.1, 0.2, 0.3],
-          timestamp: new Date()
+          timestamp: new Date(),
+          metadata: {'type': 'test', 'source': 'initialization'},
+          context: {'conversation_type': 'test', 'environment': 'development'},
+          message_type: 'test',
+          sentiment: 0.5,
+          topic: 'testing',
+          keywords: ['test', 'initialization'],
+          language: 'en'
         }],
         format: 'JSONEachRow'
       });
-      
+
       console.log("Test insert successful.");
-      
-      // Verify the test insert
-      const testQuery = await client.query({
-        query: `SELECT * FROM chat_embeddings WHERE message_id = 'test_message'`,
-        format: 'JSONEachRow'
-      });
-      
-      const testResult = await testQuery.json();
-      console.log("Test query result:", testResult.length > 0 ? "Record found" : "No record found");
     } catch (testError) {
       console.error("Test insert failed:", testError);
     }
-    
+
     console.log("Table 'chat_embeddings' initialization completed.");
   } catch (error) {
     console.error("Error initializing chat_embeddings table:", error);
@@ -142,8 +160,8 @@ const generateEmbedding = async (text) => {
   }
 };
 
-// Store a message embedding in ClickHouse
-const storeEmbedding = async (userId, conversationId, messageId, message, isAi, embedding) => {
+// Store a message embedding in ClickHouse with enhanced metadata
+const storeEmbedding = async (userId, conversationId, messageId, message, isAi, embedding, metadata = {}, context = {}) => {
   try {
     // Validate inputs
     if (!userId || !messageId || !message || !embedding || embedding.length === 0) {
@@ -164,25 +182,34 @@ const storeEmbedding = async (userId, conversationId, messageId, message, isAi, 
       messageId,
       messageLength: message.length,
       isAi,
-      embeddingDimensions: embedding.length
+      embeddingDimensions: embedding.length,
+      metadata,
+      context
     });
 
     // Truncate message if too long for ClickHouse
     const truncatedMessage = message.length > 10000 ? message.substring(0, 10000) : message;
 
-    // Prepare the data
+    // Prepare the data with enhanced metadata
     const data = {
       user_id: userId,
       conversation_id: conversationId || '',
       message_id: messageId,
       message: truncatedMessage,
-      is_ai: isAi ? 1 : 0, // Ensure boolean is converted to 0/1
+      is_ai: isAi ? 1 : 0,
       embedding: embedding,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      metadata: metadata,
+      context: context,
+      message_type: metadata.message_type || 'chat',
+      sentiment: metadata.sentiment || 0.0,
+      topic: metadata.topic || '',
+      keywords: metadata.keywords || [],
+      language: metadata.language || 'en'
     };
 
     console.log(`Attempting to store embedding for message ${messageId}...`);
-    
+
     // Insert the data
     const result = await client.insert({
       table: 'chat_embeddings',
@@ -191,7 +218,7 @@ const storeEmbedding = async (userId, conversationId, messageId, message, isAi, 
     });
 
     console.log(`Embedding stored successfully for message ${messageId}`);
-    
+
     logResponse(`${ENDPOINT_SERVICE}.storeEmbedding`, {
       success: true,
       userId,
@@ -217,7 +244,7 @@ const findSimilarMessages = async (userId, queryText, limit = 5) => {
   try {
     // Generate embedding for the query text
     const queryEmbedding = await generateEmbedding(queryText);
-    
+
     logRequest(`${ENDPOINT_SERVICE}.findSimilarMessages`, {
       userId,
       queryTextLength: queryText.length,
@@ -225,19 +252,37 @@ const findSimilarMessages = async (userId, queryText, limit = 5) => {
       limit
     });
 
+    // Check if this is a query about previous notification questions
+    const isAskingAboutNotifications = queryText.toLowerCase().includes('last question') ||
+                                     queryText.toLowerCase().includes('previous question') ||
+                                     queryText.toLowerCase().includes('notification question');
+
     // Use ClickHouse's cosineDistance function to find similar messages
-    const query = `
-      SELECT 
+    let query = `
+      SELECT
         message_id,
         message,
         is_ai,
         conversation_id,
+        metadata,
         1 - cosineDistance(embedding, [${queryEmbedding}]) AS similarity
       FROM chat_embeddings
       WHERE user_id = '${userId}'
-      ORDER BY similarity DESC
-      LIMIT ${limit}
     `;
+
+    // If asking about notifications, prioritize notification questions
+    if (isAskingAboutNotifications) {
+      query += `
+        AND metadata['isNotificationQuestion'] = 'true'
+        ORDER BY similarity DESC, timestamp DESC
+        LIMIT ${limit}
+      `;
+    } else {
+      query += `
+        ORDER BY similarity DESC
+        LIMIT ${limit}
+      `;
+    }
 
     const result = await client.query({
       query,
@@ -248,7 +293,8 @@ const findSimilarMessages = async (userId, queryText, limit = 5) => {
 
     logResponse(`${ENDPOINT_SERVICE}.findSimilarMessages`, {
       count: similarMessages.length,
-      topSimilarity: similarMessages.length > 0 ? similarMessages[0].similarity : null
+      topSimilarity: similarMessages.length > 0 ? similarMessages[0].similarity : null,
+      isAskingAboutNotifications
     });
 
     return similarMessages;
@@ -260,10 +306,10 @@ const findSimilarMessages = async (userId, queryText, limit = 5) => {
 };
 
 // Process a new chat message to generate and store its embedding
-const processMessageEmbedding = async (userId, conversationId, messageId, message, isAi) => {
+const processMessageEmbedding = async (userId, conversationId, messageId, message, isAi, metadata = {}, context = {}) => {
   try {
     console.log(`Processing embedding for message ${messageId} (${isAi ? 'AI' : 'User'})...`);
-    
+
     // Validate inputs
     if (!userId || !messageId || !message) {
       console.error('Missing required parameters for processing message embedding:', {
@@ -273,25 +319,25 @@ const processMessageEmbedding = async (userId, conversationId, messageId, messag
       });
       return false;
     }
-    
+
     // Truncate message if too long for embedding API
     const maxLength = 8000; // OpenAI has token limits
     const truncatedMessage = message.length > maxLength ? message.substring(0, maxLength) : message;
-    
+
     // Generate embedding
     console.log(`Generating embedding for message ${messageId}...`);
     const embedding = await generateEmbedding(truncatedMessage);
-    
+
     if (!embedding || embedding.length === 0) {
       console.error(`Failed to generate embedding for message ${messageId}`);
       return false;
     }
-    
+
     console.log(`Successfully generated embedding with ${embedding.length} dimensions`);
-    
-    // Store embedding
-    await storeEmbedding(userId, conversationId, messageId, truncatedMessage, isAi, embedding);
-    
+
+    // Store embedding with metadata and context
+    await storeEmbedding(userId, conversationId, messageId, truncatedMessage, isAi, embedding, metadata, context);
+
     console.log(`Completed embedding process for message ${messageId}`);
     return true;
   } catch (error) {
