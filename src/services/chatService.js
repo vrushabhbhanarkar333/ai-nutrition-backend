@@ -13,6 +13,7 @@ const ActivityData = require('../models/ActivityData');
 const DietaryPreferences = require('../models/DietaryPreferences');
 const Notification = require('../models/Notification');
 const Profile = require('../models/Profile');
+const stepCountService = require('./stepCountService');
 
 // Initialize ClickHouse client
 const client = createClient({
@@ -258,7 +259,23 @@ Remember to:
 4. Connect current questions with past interactions
 5. Balance personal data with general knowledge
 6. Maintain conversation flow and context
-7. Provide practical, actionable advice`;
+7. Provide practical, actionable advice
+
+IMPORTANT: When users ask about their step count, ALWAYS include the following information in your response:
+1. Current Step Count:
+   - Today's steps: ${userData.stepCount?.current || 0}
+   - Daily goal: ${userData.profile?.dailyStepGoal || 10000}
+   - Progress percentage: ${((userData.stepCount?.current || 0) / (userData.profile?.dailyStepGoal || 10000) * 100).toFixed(1)}%
+
+2. Step Count Trend (Last 7 Days):
+   - Average steps: ${userData.stepCount?.average || 0}
+   - Total steps: ${userData.stepCount?.total || 0}
+   - Days tracked: ${userData.stepCount?.days || 0}
+
+3. Step Count Analysis:
+   - Goal achievement: ${userData.stepCount?.goalAchievement || 'Not tracked'}
+   - Trend direction: ${userData.stepCount?.trend || 'Not tracked'}
+   - Recommendations: ${userData.stepCount?.recommendations || 'Not tracked'}`;
 
       // Initialize messages array with system message
       const messages = [
@@ -492,7 +509,61 @@ async function gatherUserData(userId) {
       }
     };
 
-    return {
+    // Get step count data with proper error handling
+    let stepCountData = {
+      current: 0,
+      trend: [],
+      average: 0,
+      total: 0,
+      days: 0,
+      goalAchievement: 'Not tracked',
+      trend: 'Not enough data',
+      recommendations: 'No data available'
+    };
+
+    try {
+      // Get today's step count
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const currentStepCount = await stepCountService.getStepCount(userId, today);
+      
+      // Get step count trend
+      const stepTrend = await stepCountService.getStepCountTrend(userId);
+      
+      // Get average steps
+      const averageSteps = await stepCountService.getAverageStepCount(
+        userId,
+        new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+        new Date()
+      );
+
+      // Calculate total steps
+      const totalSteps = stepTrend.reduce((sum, record) => sum + (record.count || 0), 0);
+
+      // Update step count data
+      stepCountData = {
+        current: currentStepCount.count || 0,
+        trend: stepTrend,
+        average: averageSteps || 0,
+        total: totalSteps,
+        days: stepTrend.length,
+        goalAchievement: (currentStepCount.count || 0) >= (profile?.dailyStepGoal || 10000) ? 'Achieved' : 'Not achieved',
+        trend: stepTrend.length > 1 ? 
+          ((stepTrend[stepTrend.length - 1]?.count || 0) > (stepTrend[0]?.count || 0) ? 'Increasing' : 'Decreasing') : 
+          'Not enough data',
+        recommendations: getStepCountRecommendations(
+          currentStepCount.count || 0,
+          averageSteps || 0,
+          profile?.dailyStepGoal || 10000
+        )
+      };
+    } catch (error) {
+      console.error('Error gathering step count data:', error);
+      // Keep default values if there's an error
+    }
+
+    // Add step count data to user data
+    const userData = {
       profile: comprehensiveProfile,
       healthData,
       statsData,
@@ -517,45 +588,14 @@ async function gatherUserData(userId) {
         dailySummary,
         averageDailyCalories,
         totalCaloriesLastWeek: totalCalories
-      }
+      },
+      stepCount: stepCountData
     };
+
+    return userData;
   } catch (error) {
     console.error('Error gathering user data:', error);
-    return {
-      profile: {
-        basicInfo: {
-          name: '',
-          email: '',
-          username: ''
-        },
-        physicalMetrics: {
-          height: null,
-          weight: null,
-          bmi: null,
-          age: null,
-          gender: null
-        },
-        fitnessInfo: {
-          fitness_goal: null,
-          activity_level: null,
-          dietary_restrictions: []
-        },
-        timestamps: {
-          createdAt: null,
-          updatedAt: null
-        }
-      },
-      healthData: null,
-      statsData: null,
-      recentActivities: [],
-      dietaryPreferences: null,
-      mealData: {
-        recentMeals: [],
-        dailySummary: [],
-        averageDailyCalories: 0,
-        totalCaloriesLastWeek: 0
-      }
-    };
+    throw error;
   }
 }
 
@@ -777,6 +817,30 @@ Please provide accurate and helpful responses based on the user's profile and th
     throw error;
   }
 };
+
+// Add this helper function
+function getStepCountRecommendations(currentSteps, averageSteps, dailyGoal) {
+  const recommendations = [];
+  
+  if (currentSteps < dailyGoal) {
+    const remainingSteps = dailyGoal - currentSteps;
+    recommendations.push(`You need ${remainingSteps} more steps to reach your daily goal.`);
+    
+    if (remainingSteps > 1000) {
+      recommendations.push('Consider taking a longer walk or doing some light exercise.');
+    }
+  } else {
+    recommendations.push('Great job! You\'ve reached your daily step goal.');
+  }
+
+  if (averageSteps < dailyGoal) {
+    recommendations.push('Your average daily steps are below your goal. Try to be more active throughout the day.');
+  } else {
+    recommendations.push('You\'re maintaining a good average step count. Keep up the good work!');
+  }
+
+  return recommendations.join(' ');
+}
 
 module.exports = {
   initializeChatTable,

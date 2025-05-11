@@ -466,6 +466,45 @@ const findRelevantProfileInfo = async (userId, queryText, limit = 1) => {
   }
 };
 
+// Store step count embedding in vector database
+const storeStepCountEmbedding = async (userId, stepCountData) => {
+  try {
+    console.log('Storing step count embedding:', { userId, stepCountData });
+
+    // Generate text representation of step count data
+    const text = `User ${userId} took ${stepCountData.count} steps on ${new Date(stepCountData.date).toLocaleDateString()}`;
+
+    // Generate embedding
+    const embedding = await generateEmbedding(text);
+
+    // Prepare metadata
+    const metadata = {
+      type: 'step_count',
+      date: stepCountData.date.toISOString(),
+      count: stepCountData.count.toString(),
+      forceUpdate: stepCountData.forceUpdate ? 'true' : 'false',
+      source: 'healthkit'
+    };
+
+    // Store in vector database
+    await storeEmbedding(
+      userId.toString(),
+      'step_count',
+      `step_${stepCountData.date.toISOString()}`,
+      text,
+      false,
+      embedding,
+      metadata,
+      { dataType: 'step_count' }
+    );
+
+    console.log('Step count embedding stored successfully');
+  } catch (error) {
+    console.error('Error storing step count embedding:', error);
+    throw error;
+  }
+};
+
 module.exports = {
   initializeVectorTable,
   generateEmbedding,
@@ -474,5 +513,6 @@ module.exports = {
   processMessageEmbedding,
   initializeProfileEmbeddingsTable,
   storeProfileEmbedding,
-  findRelevantProfileInfo
+  findRelevantProfileInfo,
+  storeStepCountEmbedding
 };
