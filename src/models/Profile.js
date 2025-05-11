@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { storeProfileEmbedding } = require('../services/embeddingService');
 
 const profileSchema = new mongoose.Schema({
   userId: {
@@ -66,7 +67,7 @@ const profileSchema = new mongoose.Schema({
 });
 
 // Calculate BMI before saving
-profileSchema.pre('save', function(next) {
+profileSchema.pre('save', async function(next) {
   if (this.isModified('height') || this.isModified('weight')) {
     // Only calculate BMI if both height and weight are present
     if (this.height && this.weight) {
@@ -77,6 +78,16 @@ profileSchema.pre('save', function(next) {
   }
   this.updatedAt = new Date();
   next();
+});
+
+// Store profile in vector database after saving
+profileSchema.post('save', async function(doc) {
+  try {
+    await storeProfileEmbedding(doc.userId, doc.toObject());
+  } catch (error) {
+    console.error('Error storing profile in vector database:', error);
+    // Don't throw the error to prevent breaking the save operation
+  }
 });
 
 module.exports = mongoose.model('Profile', profileSchema);
