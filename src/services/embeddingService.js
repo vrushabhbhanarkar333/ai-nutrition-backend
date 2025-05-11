@@ -346,10 +346,173 @@ const processMessageEmbedding = async (userId, conversationId, messageId, messag
   }
 };
 
+// Initialize profile embeddings table
+const initializeProfileEmbeddingsTable = async () => {
+  try {
+    console.log("Initializing profile_embeddings table...");
+
+    // First, check if the table exists
+    const tableExists = await client.query({
+      query: `
+        SELECT name
+        FROM system.tables
+        WHERE database = currentDatabase()
+        AND name = 'profile_embeddings'
+      `,
+      format: 'JSONEachRow'
+    });
+
+    const tableExistsResult = await tableExists.json();
+
+    // If table doesn't exist, create it
+    if (tableExistsResult.length === 0) {
+      console.log("Creating profile_embeddings table...");
+
+      await client.query({
+        query: `
+          CREATE TABLE IF NOT EXISTS profile_embeddings (
+            id UUID DEFAULT generateUUIDv4(),
+            user_id String,
+            profile_data String,
+            embedding Array(Float32),
+            timestamp DateTime64(3) DEFAULT now64(3),
+            metadata Map(String, String),
+            profile_type String DEFAULT 'user_profile'
+          ) ENGINE = MergeTree()
+          ORDER BY (user_id, timestamp)
+        `,
+      });
+
+      console.log("Table 'profile_embeddings' created successfully.");
+    } else {
+      console.log("Table 'profile_embeddings' already exists.");
+    }
+  } catch (error) {
+    console.error("Error initializing profile_embeddings table:", error);
+    throw error;
+  }
+};
+
+// Store profile embedding
+const storeProfileEmbedding = async (userId, profileData) => {
+  try {
+    // Convert profile data to a structured string
+    const profileString = JSON.stringify({
+      height: profileData.height,
+      weight: profileData.weight,
+      bmi: profileData.bmi,
+      age: profileData.age,
+      gender: profileData.gender,
+      fitness_goal: profileData.fitness_goal,
+      activity_level: profileData.activity_level,
+      dietary_restrictions: profileData.dietary_restrictions
+    });
+
+    // Generate embedding for the profile data
+    const embedding = await generateEmbedding(profileString);
+
+    // Store in vector database
+    await client.insert({
+      table: 'profile_embeddings',
+      values: [{
+        user_id: userId,
+        profile_data: profileString,
+        embedding: embedding,
+        timestamp: new Date().toISOString(),
+        metadata: {
+          'profile_type': 'user_profile',
+          'last_updated': new Date().toISOString()
+        },
+        profile_type: 'user_profile'
+      }],
+      format: 'JSONEachRow'
+    });
+
+    console.log(`Profile embedding stored successfully for user ${userId}`);
+  } catch (error) {
+    console.error(`Error storing profile embedding for user ${userId}:`, error);
+    throw error;
+  }
+};
+
+// Find relevant profile information
+const findRelevantProfileInfo = async (userId, queryText, limit = 1) => {
+  try {
+    const queryEmbedding = await generateEmbedding(queryText);
+
+    const result = await client.query({
+      query: `
+        SELECT
+          profile_data,
+          cosineDistance(embedding, {embedding:Array(Float32)}) as distance
+        FROM profile_embeddings
+        WHERE user_id = {userId:String}
+        ORDER BY distance ASC
+        LIMIT {limit:UInt32}
+      `,
+      format: 'JSONEachRow',
+      query_params: {
+        embedding: queryEmbedding,
+        userId: userId,
+        limit: limit
+      }
+    });
+
+    const results = await result.json();
+    return results.map(r => JSON.parse(r.profile_data));
+  } catch (error) {
+    console.error(`Error finding relevant profile info for user ${userId}:`, error);
+    throw error;
+  }
+};
+
+// Store step count embedding in vector database
+const storeStepCountEmbedding = async (userId, stepCountData) => {
+  try {
+    console.log('Storing step count embedding:', { userId, stepCountData });
+
+    // Generate text representation of step count data
+    const text = `User ${userId} took ${stepCountData.count} steps on ${new Date(stepCountData.date).toLocaleDateString()}`;
+
+    // Generate embedding
+    const embedding = await generateEmbedding(text);
+
+    // Prepare metadata
+    const metadata = {
+      type: 'step_count',
+      date: stepCountData.date.toISOString(),
+      count: stepCountData.count.toString(),
+      forceUpdate: stepCountData.forceUpdate ? 'true' : 'false',
+      source: 'healthkit'
+    };
+
+    // Store in vector database
+    await storeEmbedding(
+      userId.toString(),
+      'step_count',
+      `step_${stepCountData.date.toISOString()}`,
+      text,
+      false,
+      embedding,
+      metadata,
+      { dataType: 'step_count' }
+    );
+
+    console.log('Step count embedding stored successfully');
+  } catch (error) {
+    console.error('Error storing step count embedding:', error);
+    throw error;
+  }
+};
+
 module.exports = {
   initializeVectorTable,
   generateEmbedding,
   storeEmbedding,
   findSimilarMessages,
-  processMessageEmbedding
+  processMessageEmbedding,
+  initializeProfileEmbeddingsTable,
+  storeProfileEmbedding,
+  findRelevantProfileInfo,
+  storeStepCountEmbedding
 };

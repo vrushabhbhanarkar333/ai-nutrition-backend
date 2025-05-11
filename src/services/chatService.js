@@ -4,7 +4,7 @@ const Chat = require('../models/Chat');
 const fs = require('fs');
 const path = require('path');
 const { logRequest, logResponse, logError } = require('../utils/debugLogger');
-const { findSimilarMessages, processMessageEmbedding } = require('./embeddingService');
+const { findSimilarMessages, processMessageEmbedding, findRelevantProfileInfo } = require('./embeddingService');
 const foodService = require('./foodService');
 const User = require('../models/User');
 const HealthData = require('../models/HealthData');
@@ -12,6 +12,8 @@ const StatsData = require('../models/StatsData');
 const ActivityData = require('../models/ActivityData');
 const DietaryPreferences = require('../models/DietaryPreferences');
 const Notification = require('../models/Notification');
+const Profile = require('../models/Profile');
+const stepCountService = require('./stepCountService');
 
 // Initialize ClickHouse client
 const client = createClient({
@@ -156,10 +158,31 @@ const chatService = {
       // 5. Enhanced system prompt with comprehensive context
       const systemPrompt = `You are a nutrition and fitness assistant with access to comprehensive user data and conversation history.
 
-IMPORTANT: When users ask about their meals, calorie counts, or nutrition data, ALWAYS include the relevant meal data in your response. If a user asks about their calorie count for today or the past week, you MUST provide this information from the meal data provided below.
+IMPORTANT: When users ask about their profile, ALWAYS include ALL of the following information in your response:
+1. Basic Information:
+   - Name: ${userData.profile.basicInfo.name}
+   - Email: ${userData.profile.basicInfo.email}
+   - Username: ${userData.profile.basicInfo.username}
+
+2. Physical Metrics:
+   - Height: ${userData.profile.physicalMetrics.height} cm
+   - Weight: ${userData.profile.physicalMetrics.weight} kg
+   - BMI: ${userData.profile.physicalMetrics.bmi}
+   - Age: ${userData.profile.physicalMetrics.age}
+   - Gender: ${userData.profile.physicalMetrics.gender}
+
+3. Fitness Information:
+   - Fitness Goal: ${userData.profile.fitnessInfo.fitness_goal}
+   - Activity Level: ${userData.profile.fitnessInfo.activity_level}
+   - Dietary Restrictions: ${userData.profile.fitnessInfo.dietary_restrictions.join(', ')}
+
+4. Profile Timestamps:
+   - Created: ${userData.profile.timestamps.createdAt}
+   - Last Updated: ${userData.profile.timestamps.updatedAt}
+
+When users ask about their meals, calorie counts, or nutrition data, ALWAYS include the relevant meal data in your response. If a user asks about their calorie count for today or the past week, you MUST provide this information from the meal data provided below.
 
 1. Data Integration and Context:
-   - User Profile: ${JSON.stringify(userData.profile)}
    - Health Data: ${JSON.stringify(userData.healthData)}
    - Stats Data: ${JSON.stringify(userData.statsData)}
    - Dietary Preferences: ${JSON.stringify(userData.dietaryPreferences)}
@@ -230,12 +253,29 @@ IMPORTANT: When users ask about their meals, calorie counts, or nutrition data, 
    - Maintain conversation continuity
 
 Remember to:
-1. ALWAYS include meal data when responding to nutrition questions
-2. Reference specific data points when relevant
-3. Connect current questions with past interactions
-4. Balance personal data with general knowledge
-5. Maintain conversation flow and context
-6. Provide practical, actionable advice`;
+1. ALWAYS include ALL profile information when asked about the user's profile
+2. ALWAYS include meal data when responding to nutrition questions
+3. Reference specific data points when relevant
+4. Connect current questions with past interactions
+5. Balance personal data with general knowledge
+6. Maintain conversation flow and context
+7. Provide practical, actionable advice
+
+IMPORTANT: When users ask about their step count, ALWAYS include the following information in your response:
+1. Current Step Count:
+   - Today's steps: ${userData.stepCount?.current || 0}
+   - Daily goal: ${userData.profile?.dailyStepGoal || 10000}
+   - Progress percentage: ${((userData.stepCount?.current || 0) / (userData.profile?.dailyStepGoal || 10000) * 100).toFixed(1)}%
+
+2. Step Count Trend (Last 7 Days):
+   - Average steps: ${userData.stepCount?.average || 0}
+   - Total steps: ${userData.stepCount?.total || 0}
+   - Days tracked: ${userData.stepCount?.days || 0}
+
+3. Step Count Analysis:
+   - Goal achievement: ${userData.stepCount?.goalAchievement || 'Not tracked'}
+   - Trend direction: ${userData.stepCount?.trend || 'Not tracked'}
+   - Recommendations: ${userData.stepCount?.recommendations || 'Not tracked'}`;
 
       // Initialize messages array with system message
       const messages = [
@@ -372,8 +412,9 @@ Remember to:
 // Helper function to gather all user data
 async function gatherUserData(userId) {
   try {
-    // Fetch user profile
+    // Fetch user profile and profile data separately
     const userProfile = await User.findById(userId);
+    const profile = await Profile.findOne({ userId });
 
     // Fetch health data
     const healthData = await HealthData.findOne({ userId });
@@ -443,8 +484,87 @@ async function gatherUserData(userId) {
       }))
     })).sort((a, b) => new Date(b.date) - new Date(a.date));
 
-    return {
-      profile: userProfile,
+    // Create a comprehensive profile object
+    const comprehensiveProfile = {
+      basicInfo: {
+        name: userProfile?.name || '',
+        email: userProfile?.email || '',
+        username: userProfile?.username || ''
+      },
+      physicalMetrics: {
+        height: profile?.height || null,
+        weight: profile?.weight || null,
+        bmi: profile?.bmi || null,
+        age: profile?.age || null,
+        gender: profile?.gender || null
+      },
+      fitnessInfo: {
+        fitness_goal: profile?.fitness_goal || null,
+        activity_level: profile?.activity_level || null,
+        dietary_restrictions: profile?.dietary_restrictions || []
+      },
+      timestamps: {
+        createdAt: profile?.createdAt || null,
+        updatedAt: profile?.updatedAt || null
+      }
+    };
+
+    // Get step count data with proper error handling
+    let stepCountData = {
+      current: 0,
+      trend: [],
+      average: 0,
+      total: 0,
+      days: 0,
+      goalAchievement: 'Not tracked',
+      trend: 'Not enough data',
+      recommendations: 'No data available'
+    };
+
+    try {
+      // Get today's step count
+      const today = new Date();
+      today.setHours(0, 0, 0, 0);
+      const currentStepCount = await stepCountService.getStepCount(userId, today);
+      
+      // Get step count trend
+      const stepTrend = await stepCountService.getStepCountTrend(userId);
+      
+      // Get average steps
+      const averageSteps = await stepCountService.getAverageStepCount(
+        userId,
+        new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+        new Date()
+      );
+
+      // Calculate total steps
+      const totalSteps = stepTrend.reduce((sum, record) => sum + (record.count || 0), 0);
+
+      // Update step count data
+      stepCountData = {
+        current: currentStepCount.count || 0,
+        trend: stepTrend,
+        average: averageSteps || 0,
+        total: totalSteps,
+        days: stepTrend.length,
+        goalAchievement: (currentStepCount.count || 0) >= (profile?.dailyStepGoal || 10000) ? 'Achieved' : 'Not achieved',
+        trend: stepTrend.length > 1 ? 
+          ((stepTrend[stepTrend.length - 1]?.count || 0) > (stepTrend[0]?.count || 0) ? 'Increasing' : 'Decreasing') : 
+          'Not enough data',
+        recommendations: getStepCountRecommendations(
+          currentStepCount.count || 0,
+          averageSteps || 0,
+          profile?.dailyStepGoal || 10000
+        )
+      };
+    } catch (error) {
+      console.error('Error gathering step count data:', error);
+      // Keep default values if there's an error
+    }
+
+    // Add step count data to user data
+    const userData = {
+      profile: comprehensiveProfile,
       healthData,
       statsData,
       recentActivities,
@@ -468,23 +588,14 @@ async function gatherUserData(userId) {
         dailySummary,
         averageDailyCalories,
         totalCaloriesLastWeek: totalCalories
-      }
+      },
+      stepCount: stepCountData
     };
+
+    return userData;
   } catch (error) {
     console.error('Error gathering user data:', error);
-    return {
-      profile: null,
-      healthData: null,
-      statsData: null,
-      recentActivities: [],
-      dietaryPreferences: null,
-      mealData: {
-        recentMeals: [],
-        dailySummary: [],
-        averageDailyCalories: 0,
-        totalCaloriesLastWeek: 0
-      }
-    };
+    throw error;
   }
 }
 
@@ -658,6 +769,77 @@ async function fetchNotificationHistory(userId) {
     console.error('Error fetching notification history:', error);
     return [];
   }
+}
+
+// Add this function to get profile context
+const getProfileContext = async (userId, query) => {
+  try {
+    const profileInfo = await findRelevantProfileInfo(userId, query);
+    if (profileInfo && profileInfo.length > 0) {
+      const profile = profileInfo[0];
+      return `
+User Profile Information:
+- Height: ${profile.height} cm
+- Weight: ${profile.weight} kg
+- BMI: ${profile.bmi}
+- Age: ${profile.age}
+- Gender: ${profile.gender}
+- Fitness Goal: ${profile.fitness_goal}
+- Activity Level: ${profile.activity_level}
+- Dietary Restrictions: ${profile.dietary_restrictions.join(', ')}
+`;
+    }
+    return '';
+  } catch (error) {
+    console.error('Error getting profile context:', error);
+    return '';
+  }
+};
+
+// Modify your existing chat function to include profile context
+const processChatMessage = async (userId, message) => {
+  try {
+    // Get profile context
+    const profileContext = await getProfileContext(userId, message);
+    
+    // Add profile context to the system message
+    const systemMessage = `You are a helpful AI nutrition and fitness assistant. Use the following user profile information to provide personalized responses:
+
+${profileContext}
+
+Please provide accurate and helpful responses based on the user's profile and their questions.`;
+
+    // ... rest of your existing chat processing code ...
+    // Make sure to include the systemMessage in your OpenAI API call
+
+  } catch (error) {
+    console.error('Error processing chat message:', error);
+    throw error;
+  }
+};
+
+// Add this helper function
+function getStepCountRecommendations(currentSteps, averageSteps, dailyGoal) {
+  const recommendations = [];
+  
+  if (currentSteps < dailyGoal) {
+    const remainingSteps = dailyGoal - currentSteps;
+    recommendations.push(`You need ${remainingSteps} more steps to reach your daily goal.`);
+    
+    if (remainingSteps > 1000) {
+      recommendations.push('Consider taking a longer walk or doing some light exercise.');
+    }
+  } else {
+    recommendations.push('Great job! You\'ve reached your daily step goal.');
+  }
+
+  if (averageSteps < dailyGoal) {
+    recommendations.push('Your average daily steps are below your goal. Try to be more active throughout the day.');
+  } else {
+    recommendations.push('You\'re maintaining a good average step count. Keep up the good work!');
+  }
+
+  return recommendations.join(' ');
 }
 
 module.exports = {
