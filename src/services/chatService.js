@@ -4,7 +4,7 @@ const Chat = require('../models/Chat');
 const fs = require('fs');
 const path = require('path');
 const { logRequest, logResponse, logError } = require('../utils/debugLogger');
-const { findSimilarMessages } = require('./embeddingService');
+const { findSimilarMessages, processMessageEmbedding } = require('./embeddingService');
 const foodService = require('./foodService');
 const User = require('../models/User');
 const HealthData = require('../models/HealthData');
@@ -39,7 +39,7 @@ const initializeChatTable = async () => {
     `,
   });
   console.log("Table 'chat_history' initialized.");
-  
+
   // Check if conversation_id column exists, add it if not
   try {
     await client.query({
@@ -63,14 +63,14 @@ const insertChatRecord = async (userMessage, aiResponse, conversationId = null) 
     .replace(/^#+\s+/gm, '')         // Remove heading markers
     .replace(/^[-*+]\s+/gm, '')      // Remove bullet points
     .replace(/`([^`]+)`/g, '$1');    // Remove code formatting
-    
+
   const cleanAiResponse = aiResponse
     .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold formatting
     .replace(/\*(.*?)\*/g, '$1')     // Remove italic formatting
     .replace(/^#+\s+/gm, '')         // Remove heading markers
     .replace(/^[-*+]\s+/gm, '')      // Remove bullet points
     .replace(/`([^`]+)`/g, '$1');    // Remove code formatting
-    
+
   await client.insert({
     table: 'chat_history',
     values: [
@@ -89,13 +89,13 @@ const insertChatRecord = async (userMessage, aiResponse, conversationId = null) 
 // Fetch chat history
 const fetchChatHistory = async (conversationId = null) => {
   let query = 'SELECT * FROM chat_history';
-  
+
   if (conversationId) {
     query += ` WHERE conversation_id = '${conversationId}'`;
   }
-  
+
   query += ' ORDER BY timestamp ASC'; // Order chronologically for proper conversation flow
-  
+
   const rows = await client.query({
     query,
     format: 'JSONEachRow',
@@ -121,10 +121,10 @@ const chatService = {
 
       // 1. Gather all user data
       const userData = await gatherUserData(userId);
-      
+
       // 2. Analyze the question type and intent
       const questionAnalysis = await analyzeQuestion(message, userData);
-      
+
       // 3. Prepare metadata for vector storage
       const messageMetadata = {
         message_type: options.isNotificationQuestion ? 'notification_question' : 'chat',
@@ -149,11 +149,14 @@ const chatService = {
         health_data: userData.healthData,
         stats_data: userData.statsData,
         dietary_preferences: userData.dietaryPreferences,
-        recent_activities: userData.recentActivities
+        recent_activities: userData.recentActivities,
+        meal_data: userData.mealData
       };
 
       // 5. Enhanced system prompt with comprehensive context
-      const systemPrompt = `You are a nutrition and fitness assistant with access to comprehensive user data and conversation history. Your responses should be:
+      const systemPrompt = `You are a nutrition and fitness assistant with access to comprehensive user data and conversation history.
+
+IMPORTANT: When users ask about their meals, calorie counts, or nutrition data, ALWAYS include the relevant meal data in your response. If a user asks about their calorie count for today or the past week, you MUST provide this information from the meal data provided below.
 
 1. Data Integration and Context:
    - User Profile: ${JSON.stringify(userData.profile)}
@@ -161,16 +164,34 @@ const chatService = {
    - Stats Data: ${JSON.stringify(userData.statsData)}
    - Dietary Preferences: ${JSON.stringify(userData.dietaryPreferences)}
    - Recent Activities: ${JSON.stringify(userData.recentActivities)}
+
+2. MEAL DATA (CRITICAL FOR NUTRITION QUESTIONS):
+   - Recent Meals (last 7 days): ${JSON.stringify(userData.mealData.recentMeals)}
+   - Daily Calorie Summary: ${JSON.stringify(userData.mealData.dailySummary)}
+   - Average Daily Calories: ${userData.mealData.averageDailyCalories}
+   - Total Calories Last Week: ${userData.mealData.totalCaloriesLastWeek}
+
+3. Conversation Context:
    - Previous Conversations: ${JSON.stringify(await fetchChatHistory(options.conversationId))}
    - Notification History: ${JSON.stringify(await fetchNotificationHistory(userId))}
 
-2. Question Analysis:
+4. Question Analysis:
    - Type: ${questionAnalysis.type}
    - Intent: ${questionAnalysis.intent}
    - Relevant Data Types: ${questionAnalysis.relevantDataTypes.join(', ')}
+   - Is Meal Related: ${questionAnalysis.isMealRelated}
    - Context: ${questionAnalysis.context || 'general'}
 
-3. Response Guidelines:
+5. MEAL DATA INSTRUCTIONS (CRITICAL):
+   - When asked about meals or calories, ALWAYS include specific meal data in your response
+   - For "recent meals" questions, list the most recent meals with dates, types, and calories
+   - For "calorie count" questions, provide exact numbers from the meal data
+   - For "today's calories" or "yesterday's calories", use the most recent day in the data
+   - For "last 7 days calories", list the daily calorie totals from the dailySummary
+   - ALWAYS mention the average daily calorie count when discussing calorie trends
+   - When asked about nutrition improvements, compare current intake to dietary goals
+
+6. Response Guidelines:
    - Combine user data with general nutrition/fitness knowledge
    - Reference specific metrics from user's history
    - Connect current question with previous interactions
@@ -180,26 +201,27 @@ const chatService = {
    - Use both specific user data and general knowledge
    - Keep responses concise but comprehensive
 
-4. Data Integration Strategy:
+7. Data Integration Strategy:
    - Primary Data Sources:
      * User's personal metrics and history
      * Previous conversation context
      * Notification questions and responses
      * Recent activities and progress
+     * Meal data and calorie information
    - Secondary Knowledge:
      * General nutrition principles
      * Fitness best practices
      * Health guidelines
      * Scientific research
 
-5. Context Awareness:
+8. Context Awareness:
    - Track conversation threads
    - Reference previous notification questions
    - Consider user's progress over time
    - Maintain awareness of user's goals
    - Connect related topics across conversations
 
-6. Response Structure:
+9. Response Structure:
    - Acknowledge user's specific situation
    - Reference relevant historical data
    - Provide personalized advice
@@ -208,7 +230,7 @@ const chatService = {
    - Maintain conversation continuity
 
 Remember to:
-1. Always consider the user's complete context
+1. ALWAYS include meal data when responding to nutrition questions
 2. Reference specific data points when relevant
 3. Connect current questions with past interactions
 4. Balance personal data with general knowledge
@@ -334,7 +356,8 @@ Remember to:
         relevantData: {
           userProfile: userData.profile,
           healthData: userData.healthData,
-          statsData: userData.statsData
+          statsData: userData.statsData,
+          mealData: userData.mealData
         }
       };
 
@@ -351,27 +374,101 @@ async function gatherUserData(userId) {
   try {
     // Fetch user profile
     const userProfile = await User.findById(userId);
-    
+
     // Fetch health data
     const healthData = await HealthData.findOne({ userId });
-    
+
     // Fetch stats data
     const statsData = await StatsData.findOne({ userId });
-    
+
     // Fetch recent activities
     const recentActivities = await ActivityData.find({ userId })
       .sort({ timestamp: -1 })
       .limit(10);
-    
+
     // Fetch dietary preferences
     const dietaryPreferences = await DietaryPreferences.findOne({ userId });
+
+    // Fetch recent meals (last 7 days)
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+    const Meal = require('../models/Meal');
+    const recentMeals = await Meal.find({
+      userId,
+      date: { $gte: sevenDaysAgo }
+    }).sort({ date: -1 }).limit(10);
+
+    // Calculate daily calorie averages
+    const mealsByDate = {};
+    recentMeals.forEach(meal => {
+      const dateKey = meal.date.toISOString().split('T')[0];
+      if (!mealsByDate[dateKey]) {
+        mealsByDate[dateKey] = [];
+      }
+      mealsByDate[dateKey].push(meal);
+    });
+
+    // Calculate calories by date
+    const caloriesByDate = {};
+    Object.keys(mealsByDate).forEach(date => {
+      caloriesByDate[date] = mealsByDate[date].reduce(
+        (sum, meal) => sum + meal.totalCalories, 0
+      );
+    });
+
+    // Calculate average daily calories
+    const totalDays = Object.keys(caloriesByDate).length;
+    const totalCalories = Object.values(caloriesByDate).reduce((sum, cal) => sum + cal, 0);
+    const averageDailyCalories = totalDays > 0 ? Math.round(totalCalories / totalDays) : 0;
+
+    // Create a daily summary
+    const dailySummary = Object.keys(mealsByDate).map(date => ({
+      date,
+      totalCalories: caloriesByDate[date],
+      mealCount: mealsByDate[date].length,
+      meals: mealsByDate[date].map(meal => ({
+        id: meal._id.toString(),
+        mealType: meal.mealType,
+        totalCalories: meal.totalCalories,
+        foodItems: meal.foodItems.map(item => ({
+          name: item.name,
+          calories: item.calories,
+          protein: item.protein,
+          carbs: item.carbs,
+          fat: item.fat,
+          fiber: item.fiber,
+          isHealthy: item.isHealthy
+        }))
+      }))
+    })).sort((a, b) => new Date(b.date) - new Date(a.date));
 
     return {
       profile: userProfile,
       healthData,
       statsData,
       recentActivities,
-      dietaryPreferences
+      dietaryPreferences,
+      mealData: {
+        recentMeals: recentMeals.map(meal => ({
+          id: meal._id.toString(),
+          date: meal.date,
+          mealType: meal.mealType,
+          totalCalories: meal.totalCalories,
+          foodItems: meal.foodItems.map(item => ({
+            name: item.name,
+            calories: item.calories,
+            protein: item.protein,
+            carbs: item.carbs,
+            fat: item.fat,
+            fiber: item.fiber,
+            isHealthy: item.isHealthy
+          }))
+        })),
+        dailySummary,
+        averageDailyCalories,
+        totalCaloriesLastWeek: totalCalories
+      }
     };
   } catch (error) {
     console.error('Error gathering user data:', error);
@@ -380,7 +477,13 @@ async function gatherUserData(userId) {
       healthData: null,
       statsData: null,
       recentActivities: [],
-      dietaryPreferences: null
+      dietaryPreferences: null,
+      mealData: {
+        recentMeals: [],
+        dailySummary: [],
+        averageDailyCalories: 0,
+        totalCaloriesLastWeek: 0
+      }
     };
   }
 }
@@ -388,34 +491,138 @@ async function gatherUserData(userId) {
 // Helper function to analyze question type and intent
 async function analyzeQuestion(message, userData) {
   try {
-    const analysisResponse = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
-      messages: [
-        {
-          role: "system",
-          content: `Analyze the following question and determine:
-1. Question type (nutrition, fitness, general, etc.)
-2. User intent
-3. Relevant data types needed to answer
-4. Whether it's related to previous notifications
-5. If it requires specific user data (calories, stats, etc.)`
-        },
-        {
-          role: "user",
-          content: message
-        }
-      ],
-      max_tokens: 200,
-      temperature: 0.3
-    });
+    // First, check for common meal-related queries using regex patterns
+    const mealPatterns = [
+      /recent\s+(\d+)?\s*meals/i,
+      /last\s+(\d+)?\s*meals/i,
+      /what\s+(did|have)\s+I\s+(eat|had|consumed)/i,
+      /calorie\s+count/i,
+      /calories?\s+(of|for|in|from)/i,
+      /average\s+calorie/i,
+      /total\s+calories/i,
+      /meal\s+history/i,
+      /nutrition\s+summary/i,
+      /food\s+log/i,
+      /diet\s+summary/i,
+      /what\s+I\s+(ate|consumed|had)/i,
+      /today'?s\s+calories?/i,
+      /yesterday'?s\s+calories?/i,
+      /calories?\s+yesterday/i,
+      /calories?\s+today/i,
+      /calories?\s+count/i,
+      /calories?\s+intake/i,
+      /calories?\s+consumed/i,
+      /calories?\s+eaten/i,
+      /calories?\s+burned/i,
+      /calories?\s+last\s+(\d+)?\s*days?/i,
+      /calories?\s+week/i,
+      /week'?s?\s+calories?/i,
+      /improve\s+nutrition/i,
+      /improve\s+diet/i,
+      /improve\s+eating/i,
+      /improve\s+calories?/i,
+      /improve\s+meal/i
+    ];
 
-    const analysis = JSON.parse(analysisResponse.choices[0].message.content);
+    const isMealQuery = mealPatterns.some(pattern => pattern.test(message));
+
+    if (isMealQuery) {
+      // For meal-related queries, return a specialized analysis
+      return {
+        type: 'nutrition',
+        intent: 'get_meal_data',
+        relevantDataTypes: ['meal_history', 'calorie_data', 'nutrition_data'],
+        isNotificationRelated: false,
+        requiresUserData: true,
+        isMealRelated: true
+      };
+    }
+
+    // For other queries, use a simpler approach without JSON parsing
+    // Directly analyze the message content
+    const messageLower = message.toLowerCase();
+
+    // Determine question type
+    let questionType = 'general';
+    if (messageLower.includes('meal') || messageLower.includes('food') ||
+        messageLower.includes('eat') || messageLower.includes('calorie') ||
+        messageLower.includes('nutrition')) {
+      questionType = 'nutrition';
+    } else if (messageLower.includes('exercise') || messageLower.includes('workout') ||
+               messageLower.includes('activity') || messageLower.includes('steps')) {
+      questionType = 'fitness';
+    } else if (messageLower.includes('weight') || messageLower.includes('height') ||
+               messageLower.includes('bmi') || messageLower.includes('profile')) {
+      questionType = 'profile';
+    }
+
+    // Determine intent
+    let intent = 'get_information';
+    if (messageLower.includes('how') || messageLower.includes('what') ||
+        messageLower.includes('why') || messageLower.includes('when')) {
+      intent = 'get_information';
+    } else if (messageLower.includes('add') || messageLower.includes('create') ||
+               messageLower.includes('log') || messageLower.includes('record')) {
+      intent = 'add_data';
+    } else if (messageLower.includes('update') || messageLower.includes('change') ||
+               messageLower.includes('modify')) {
+      intent = 'update_data';
+    }
+
+    // Determine relevant data types
+    const relevantDataTypes = [];
+    if (messageLower.includes('meal') || messageLower.includes('food') ||
+        messageLower.includes('eat') || messageLower.includes('calorie') ||
+        messageLower.includes('nutrition')) {
+      relevantDataTypes.push('meal_data');
+    }
+    if (messageLower.includes('exercise') || messageLower.includes('workout') ||
+        messageLower.includes('activity') || messageLower.includes('steps')) {
+      relevantDataTypes.push('activity_data');
+    }
+    if (messageLower.includes('weight') || messageLower.includes('height') ||
+        messageLower.includes('bmi') || messageLower.includes('profile')) {
+      relevantDataTypes.push('profile_data');
+    }
+    if (relevantDataTypes.length === 0) {
+      relevantDataTypes.push('conversation_history');
+    }
+
+    // Determine if notification related
+    const isNotificationRelated = messageLower.includes('notification') ||
+                                 messageLower.includes('alert') ||
+                                 messageLower.includes('reminder');
+
+    // Determine if requires user data
+    const requiresUserData = messageLower.includes('my') ||
+                            messageLower.includes('me') ||
+                            messageLower.includes('i') ||
+                            messageLower.includes('mine');
+
+    // Determine if meal related
+    const isMealRelated = messageLower.includes('meal') ||
+                         messageLower.includes('food') ||
+                         messageLower.includes('eat') ||
+                         messageLower.includes('calorie') ||
+                         messageLower.includes('nutrition');
+
+    // Create analysis object
+    const analysis = {
+      questionType,
+      intent,
+      relevantDataTypes,
+      isNotificationRelated,
+      requiresUserData,
+      isMealRelated
+    };
+
     return {
-      type: analysis.questionType,
-      intent: analysis.intent,
-      relevantDataTypes: analysis.relevantDataTypes,
-      isNotificationRelated: analysis.isNotificationRelated,
-      requiresUserData: analysis.requiresUserData
+      type: analysis.questionType || 'general',
+      intent: analysis.intent || 'unknown',
+      relevantDataTypes: analysis.relevantDataTypes || ['conversation_history'],
+      isNotificationRelated: analysis.isNotificationRelated || false,
+      requiresUserData: analysis.requiresUserData || false,
+      isMealRelated: analysis.isMealRelated || false
     };
   } catch (error) {
     console.error('Error analyzing question:', error);
@@ -424,7 +631,11 @@ async function analyzeQuestion(message, userData) {
       intent: 'unknown',
       relevantDataTypes: ['conversation_history'],
       isNotificationRelated: false,
-      requiresUserData: false
+      requiresUserData: false,
+      isMealRelated: message.toLowerCase().includes('meal') ||
+                    message.toLowerCase().includes('food') ||
+                    message.toLowerCase().includes('eat') ||
+                    message.toLowerCase().includes('calorie')
     };
   }
 }
@@ -436,7 +647,7 @@ async function fetchNotificationHistory(userId) {
       .sort({ timestamp: -1 })
       .limit(10)
       .lean();
-    
+
     return notifications.map(notification => ({
       question: notification.question,
       answer: notification.answer,

@@ -12,6 +12,28 @@ const openai = new OpenAI({
 const ENDPOINT = 'api/ai/chat';
 
 const aiConversationController = {
+  // Initialize vector database
+  initializeVectorDatabase: async (req, res) => {
+    try {
+      console.log('Manually initializing vector database...');
+      
+      // Initialize vector database
+      const { initializeVectorTable } = require('../services/embeddingService');
+      await initializeVectorTable();
+      
+      return res.status(200).json({
+        success: true,
+        message: 'Vector database initialized successfully'
+      });
+    } catch (error) {
+      console.error('Error initializing vector database:', error);
+      return res.status(500).json({
+        success: false,
+        error: 'Failed to initialize vector database: ' + error.message
+      });
+    }
+  },
+  
   // Handle AI conversation
   conversationChat: async (req, res) => {
     try {
@@ -33,11 +55,49 @@ const aiConversationController = {
 
       console.log(`Processing AI conversation for user ${userId}: "${message}"`);
 
+      // Analyze message to determine the type of query
+      const messageLower = message.toLowerCase();
+      const isMealRelated = messageLower.includes('meal') || messageLower.includes('food') || 
+                           messageLower.includes('eat') || messageLower.includes('diet') || 
+                           messageLower.includes('calorie') || messageLower.includes('nutrition');
+      
+      const isProfileRelated = messageLower.includes('profile') || messageLower.includes('weight') || 
+                              messageLower.includes('height') || messageLower.includes('age') || 
+                              messageLower.includes('goal');
+      
+      const isStepRelated = messageLower.includes('step') || messageLower.includes('walk') || 
+                           messageLower.includes('run') || messageLower.includes('activity');
+      
+      const isCalorieRelated = messageLower.includes('calorie') || messageLower.includes('intake') || 
+                              messageLower.includes('burn') || messageLower.includes('deficit');
+      
+      console.log(`System prompt analysis: Meal: ${isMealRelated}, Profile: ${isProfileRelated}, Step: ${isStepRelated}, Calorie: ${isCalorieRelated}`);
+      
+      // Create a specialized system prompt based on the query type
+      let systemPrompt = "You are a nutrition and exercise coach with the ability to analyze food images. When the user shares an image, analyze it in detail and incorporate your analysis into your response. When relevant information from the user's previous conversations is provided, reference it naturally in your response to personalize your advice. Your entire response must be in 2-3 short paragraphs with no special characters. Never use asterisks, bullet points, dashes or any symbols. Do not format text in any way. Keep total response under 500 words. Provide only the most essential advice in plain conversational sentences. Answer the user's question directly in brief paragraphs.";
+      
+      // Add specialized instructions based on query type
+      if (isMealRelated) {
+        systemPrompt += " For meal and nutrition related questions, be specific about nutritional content, calorie information, and dietary recommendations. Reference any previous meal data from the user's history if available. Provide concrete meal suggestions when appropriate.";
+      }
+      
+      if (isProfileRelated) {
+        systemPrompt += " For profile-related questions, reference the user's specific profile information including weight, height, age, and goals. Tailor your advice to their specific profile characteristics and objectives.";
+      }
+      
+      if (isStepRelated) {
+        systemPrompt += " For step count and activity questions, provide specific information about their step count, activity levels, and progress toward goals. Compare current data with historical trends when available.";
+      }
+      
+      if (isCalorieRelated) {
+        systemPrompt += " For calorie-related questions, be precise about calorie intake, expenditure, and balance. Reference specific meal data and activity levels to provide accurate calorie information.";
+      }
+      
       // Create messages array for chat completions API
       const messages = [
         {
           role: "system",
-          content: "You are a nutrition and exercise coach with the ability to analyze food images. When the user shares an image, analyze it in detail and incorporate your analysis into your response. When relevant information from the user's previous conversations is provided, reference it naturally in your response to personalize your advice. Your entire response must be in 2-3 short paragraphs with no special characters. Never use asterisks, bullet points, dashes or any symbols. Do not format text in any way. Keep total response under 300 words. Provide only the most essential advice in plain conversational sentences. Answer the user's question directly in brief paragraphs."
+          content: systemPrompt
         }
       ];
 
@@ -192,42 +252,140 @@ const aiConversationController = {
           messagePreview: message.substring(0, 50) + (message.length > 50 ? '...' : '')
         });
         
-        const similarMessages = await findSimilarMessages(userId, message, 3);
+        // Get similar messages with increased limit for better context
+        const similarMessages = await findSimilarMessages(userId, message, 5);
         
         logResponse(`${ENDPOINT}/vector-search`, {
           count: similarMessages.length,
           messages: similarMessages.map(m => ({
             similarity: m.similarity,
             isAI: m.is_ai,
-            preview: m.message.substring(0, 30) + '...'
+            preview: m.message.substring(0, 30) + '...',
+            messageType: m.metadata?.message_type || 'unknown'
           }))
         });
         
         // If we found similar messages, add them as context
         if (similarMessages.length > 0) {
+          // Group messages by type for better organization
+          const mealMessages = similarMessages.filter(m => 
+            m.metadata?.message_type === 'meal_data' || 
+            m.metadata?.auto_detected_type === 'meal_data' ||
+            m.message.toLowerCase().includes('meal') ||
+            m.message.toLowerCase().includes('food') ||
+            m.message.toLowerCase().includes('calorie')
+          );
+          
+          const profileMessages = similarMessages.filter(m => 
+            m.metadata?.message_type === 'user_profile' || 
+            m.metadata?.auto_detected_type === 'user_profile' ||
+            m.message.toLowerCase().includes('profile') ||
+            m.message.toLowerCase().includes('weight') ||
+            m.message.toLowerCase().includes('height')
+          );
+          
+          const activityMessages = similarMessages.filter(m => 
+            m.metadata?.message_type === 'healthkit_data' || 
+            m.metadata?.auto_detected_type === 'healthkit_data' ||
+            m.message.toLowerCase().includes('step') ||
+            m.message.toLowerCase().includes('walk') ||
+            m.message.toLowerCase().includes('activity')
+          );
+          
+          const generalMessages = similarMessages.filter(m => 
+            !mealMessages.includes(m) && 
+            !profileMessages.includes(m) && 
+            !activityMessages.includes(m)
+          );
+          
+          console.log(`Grouped messages: Meal: ${mealMessages.length}, Profile: ${profileMessages.length}, Activity: ${activityMessages.length}, General: ${generalMessages.length}`);
+          
           // Add a system message explaining the context
           messages.push({
             role: "system",
             content: "I found some relevant information from your previous conversations that might help with your current question:"
           });
           
-          // Add each similar message with its context
-          similarMessages.forEach(m => {
+          // Add meal-related messages if the query is about meals
+          if (isMealRelated && mealMessages.length > 0) {
             messages.push({
-              role: m.is_ai ? "assistant" : "user",
-              content: m.message
+              role: "system",
+              content: "Here's your relevant meal and nutrition information:"
             });
-          });
+            
+            mealMessages.forEach(m => {
+              messages.push({
+                role: m.is_ai ? "assistant" : "user",
+                content: m.message
+              });
+            });
+          }
+          
+          // Add profile-related messages if the query is about profile
+          if (isProfileRelated && profileMessages.length > 0) {
+            messages.push({
+              role: "system",
+              content: "Here's your relevant profile information:"
+            });
+            
+            profileMessages.forEach(m => {
+              messages.push({
+                role: m.is_ai ? "assistant" : "user",
+                content: m.message
+              });
+            });
+          }
+          
+          // Add activity-related messages if the query is about steps or activity
+          if (isStepRelated && activityMessages.length > 0) {
+            messages.push({
+              role: "system",
+              content: "Here's your relevant activity and step count information:"
+            });
+            
+            activityMessages.forEach(m => {
+              messages.push({
+                role: m.is_ai ? "assistant" : "user",
+                content: m.message
+              });
+            });
+          }
+          
+          // Add general messages if we don't have specific category matches
+          if ((mealMessages.length === 0 && profileMessages.length === 0 && activityMessages.length === 0) || 
+              (!isMealRelated && !isProfileRelated && !isStepRelated && !isCalorieRelated)) {
+            generalMessages.forEach(m => {
+              messages.push({
+                role: m.is_ai ? "assistant" : "user",
+                content: m.message
+              });
+            });
+          }
           
           // Add a separator
           messages.push({
             role: "system",
             content: "Now, let me address your current question specifically."
           });
+        } else {
+          console.log("No similar messages found in vector search");
+          
+          // If no similar messages found, add a note to the system to be more general
+          messages.push({
+            role: "system",
+            content: "No specific previous context found for this query. Provide a general response based on the user's question."
+          });
         }
       } catch (vectorError) {
         // Log error but continue without vector search results
         logError(`${ENDPOINT}/vector-search`, vectorError);
+        console.error("Error in vector search:", vectorError);
+        
+        // Add a fallback instruction
+        messages.push({
+          role: "system",
+          content: "Unable to retrieve vector search results. Provide a general response based on the user's question."
+        });
       }
       
       // Add current user message, including reference to the image if one was uploaded
@@ -249,14 +407,33 @@ const aiConversationController = {
       logRequest(`${ENDPOINT}/openai`, { 
         model: 'gpt-4-turbo-preview', 
         messages: messages.map(m => ({ role: m.role, content_preview: m.content.substring(0, 30) + '...' })),
-        max_tokens: 300 
+        max_tokens: 500 
       });
+      
+      // Adjust parameters based on query type
+      let temperature = 0.7;
+      let maxTokens = 500;
+      let presencePenalty = 0.0;
+      let frequencyPenalty = 0.0;
+      
+      if (isMealRelated || isProfileRelated || isStepRelated) {
+        // For data-specific queries, use lower temperature for more factual responses
+        temperature = 0.5;
+        maxTokens = 600; // Allow more tokens for detailed data responses
+        presencePenalty = 0.3; // Encourage more diverse content
+        frequencyPenalty = 0.3; // Reduce repetition
+      }
+      
+      console.log(`Using OpenAI parameters: temperature=${temperature}, maxTokens=${maxTokens}, presencePenalty=${presencePenalty}, frequencyPenalty=${frequencyPenalty}`);
       
       const response = await openai.chat.completions.create({
         model: 'gpt-4-turbo-preview',
         messages: messages,
-        max_tokens: 300,
-        temperature: 0.7
+        max_tokens: maxTokens,
+        temperature: temperature,
+        presence_penalty: presencePenalty,
+        frequency_penalty: frequencyPenalty,
+        top_p: 0.95
       });
 
       // Debug: Log OpenAI response (truncated for brevity)
