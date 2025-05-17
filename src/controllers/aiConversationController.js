@@ -44,6 +44,16 @@ const aiConversationController = {
       const userId = req.user._id;
       const imageFile = req.file;
 
+      console.log('\n==== CHAT MESSAGE REQUEST ====');
+      console.log('Request body:', req.body);
+      console.log('Request file:', imageFile ? {
+        filename: imageFile.filename,
+        mimetype: imageFile.mimetype,
+        size: imageFile.size
+      } : 'No file uploaded');
+      console.log('User:', { id: userId });
+      console.log('============================\n');
+
       if (!message) {
         const errorResponse = {
           success: false,
@@ -74,7 +84,7 @@ const aiConversationController = {
       console.log(`System prompt analysis: Meal: ${isMealRelated}, Profile: ${isProfileRelated}, Step: ${isStepRelated}, Calorie: ${isCalorieRelated}`);
       
       // Create a specialized system prompt based on the query type
-      let systemPrompt = "You are a nutrition and exercise coach with the ability to analyze food images. When the user shares an image, analyze it in detail and incorporate your analysis into your response. When relevant information from the user's previous conversations is provided, reference it naturally in your response to personalize your advice. Your entire response must be in 2-3 short paragraphs with no special characters. Never use asterisks, bullet points, dashes or any symbols. Do not format text in any way. Keep total response under 500 words. Provide only the most essential advice in plain conversational sentences. Answer the user's question directly in brief paragraphs.";
+      let systemPrompt = "You are a nutrition and exercise coach with the ability to analyze food images. When the user shares an image, analyze it in detail and incorporate your analysis into your response. When relevant information from the user's previous conversations is provided, reference it naturally in your response to personalize your advice. Your entire response must be in 2-3 short paragraphs with no special characters. Never use asterisks, bullet points, dashes or any symbols. Do not format text in any way. Keep total response under 500 words. Provide only the most essential advice in plain conversational sentences. Answer the user's question directly in brief paragraphs. IMPORTANT: Never tell the user you cannot see or analyze images - you have all the image analysis tools available and information is provided to you. When an image is shared, use the image analysis information provided to you.";
       
       // Add specialized instructions based on query type
       if (isMealRelated) {
@@ -139,49 +149,54 @@ const aiConversationController = {
           if (foodAnalysisResult.error) {
             console.log('Food analysis returned an error, falling back to vision API');
             
-            // If food analysis failed, fall back to Vision API
-            const base64Image = imageBuffer.toString('base64');
-            console.log(`Base64 image size: ${base64Image.length} characters`);
-            
-            // Debug: Log OpenAI Vision API call
-            logRequest(`${ENDPOINT}/vision-api`, {
-              model: "gpt-4-vision-preview",
-              imageSize: Math.round(base64Image.length / 1024) + 'KB'
-            });
+            try {
+              // If food analysis failed, fall back to Vision API
+              const base64Image = imageBuffer.toString('base64');
+              console.log(`Base64 image size: ${base64Image.length} characters`);
+              
+              // Debug: Log OpenAI Vision API call
+              logRequest(`${ENDPOINT}/vision-api`, {
+                model: "gpt-4o",
+                imageSize: Math.round(base64Image.length / 1024) + 'KB'
+              });
 
-            console.log('Calling OpenAI Vision API...');
-            // Get image description from OpenAI Vision API
-            const visionResponse = await openai.chat.completions.create({
-              model: "gpt-4-vision-preview",
-              messages: [
-                {
-                  role: "user",
-                  content: [
-                    {
-                      type: "text",
-                      text: "Analyze this food image in detail. Describe what you see, identify the foods, estimate nutritional content, and suggest any health considerations. Be thorough in your analysis."
-                    },
-                    {
-                      type: "image_url",
-                      image_url: {
-                        url: `data:image/jpeg;base64,${base64Image}`
+              console.log('Calling OpenAI Vision API...');
+              // Get image description from OpenAI Vision API
+              const visionResponse = await openai.chat.completions.create({
+                model: "gpt-4o",
+                messages: [
+                  {
+                    role: "user",
+                    content: [
+                      {
+                        type: "text",
+                        text: "You are now analyzing a food image. Describe what you see, identify the foods, estimate nutritional content, and suggest any health considerations. Be specific and thorough. Focus only on food items. Include estimated calories, protein, carbs, and fat content."
+                      },
+                      {
+                        type: "image_url",
+                        image_url: {
+                          url: `data:image/jpeg;base64,${base64Image}`
+                        }
                       }
-                    }
-                  ]
-                }
-              ],
-              max_tokens: 500
-            });
-            
-            console.log('Vision API response received');
-            // Debug: Log Vision API response
-            logResponse(`${ENDPOINT}/vision-api`, {
-              responseLength: visionResponse.choices[0].message.content.length,
-              preview: visionResponse.choices[0].message.content.substring(0, 50) + '...',
-              usage: visionResponse.usage
-            });
+                    ]
+                  }
+                ],
+                max_tokens: 800
+              });
+              
+              console.log('Vision API response received');
+              // Debug: Log Vision API response
+              logResponse(`${ENDPOINT}/vision-api`, {
+                responseLength: visionResponse.choices[0].message.content.length,
+                preview: visionResponse.choices[0].message.content.substring(0, 50) + '...',
+                usage: visionResponse.usage
+              });
 
-            imageAnalysis = visionResponse.choices[0].message.content;
+              imageAnalysis = visionResponse.choices[0].message.content;
+            } catch (visionError) {
+              console.error('Error with Vision API:', visionError);
+              throw new Error(`Failed to analyze image with Vision API: ${visionError.message}`);
+            }
           } else {
             // Format the food analysis result into a readable message
             const foodItems = foodAnalysisResult.foodItems;
@@ -219,7 +234,12 @@ const aiConversationController = {
           // Continue without image analysis but with a more specific error message
           messages.push({
             role: "system",
-            content: `Error analyzing image: ${imageError.message}. Respond to the user's text query only.`
+            content: `Error analyzing image: ${imageError.message}. Respond to the user's text query only, but DO NOT tell the user you cannot see or analyze images. Instead, ask them to describe the food they're asking about.`
+          });
+          
+          messages.push({
+            role: "assistant",
+            content: "I notice you've shared an image. To provide the most accurate nutritional information, could you please describe what foods are in your image?"
           });
         }
       } else {
@@ -390,9 +410,22 @@ const aiConversationController = {
       
       // Add current user message, including reference to the image if one was uploaded
       if (imageFile) {
+        // Need to format the user message with both text and image in the content array
+        // when image is present, instead of adding it as a normal text message
         messages.push({
           role: "user",
-          content: `${message} (I've also shared an image for you to analyze)`
+          content: [
+            {
+              type: "text",
+              text: message ? `${message} (I've also shared an image for you to analyze)` : "Please analyze this food image."
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: `data:image/jpeg;base64,${imageBuffer.toString('base64')}`
+              }
+            }
+          ]
         });
       } else {
         messages.push({
@@ -405,8 +438,15 @@ const aiConversationController = {
       
       // Debug: Log OpenAI request
       logRequest(`${ENDPOINT}/openai`, { 
-        model: 'gpt-4-turbo-preview', 
-        messages: messages.map(m => ({ role: m.role, content_preview: m.content.substring(0, 30) + '...' })),
+        model: 'gpt-4o', 
+        messages: messages.map(m => ({ 
+          role: m.role, 
+          content_preview: typeof m.content === 'string' 
+            ? m.content.substring(0, 30) + '...' 
+            : Array.isArray(m.content) 
+              ? 'Content array with ' + m.content.length + ' items' 
+              : 'Content is not a string or array'
+        })),
         max_tokens: 500 
       });
       
@@ -427,7 +467,7 @@ const aiConversationController = {
       console.log(`Using OpenAI parameters: temperature=${temperature}, maxTokens=${maxTokens}, presencePenalty=${presencePenalty}, frequencyPenalty=${frequencyPenalty}`);
       
       const response = await openai.chat.completions.create({
-        model: 'gpt-4-turbo-preview',
+        model: 'gpt-4o',
         messages: messages,
         max_tokens: maxTokens,
         temperature: temperature,
@@ -468,8 +508,8 @@ const aiConversationController = {
       let finalResponse = aiResponse;
       if (imageAnalysis && !aiResponse.toLowerCase().includes('image')) {
         // The AI response doesn't mention the image, so we'll add the image analysis
-        finalResponse = `Coach: I've analyzed the image you shared. ${imageAnalysis.substring(0, 150)}... 
-        
+        finalResponse = `Coach: Based on the food image you shared: ${imageAnalysis.substring(0, 200)}... 
+
 ${aiResponse.replace('Coach: ', '')}`;
       }
 

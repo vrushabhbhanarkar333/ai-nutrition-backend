@@ -222,30 +222,36 @@ const chatService = {
             // If food analysis failed, fall back to Vision API
             const base64Image = imageBuffer.toString('base64');
             
-            // Get image description from OpenAI Vision API
+            // Use OpenAI to analyze the image
             const visionResponse = await openai.chat.completions.create({
-              model: "gpt-4-vision-preview",
+              model: "gpt-4o",
               messages: [
                 {
                   role: "user",
                   content: [
                     {
                       type: "text",
-                      text: "Analyze this food image in detail. Describe what you see, identify the foods, estimate nutritional content, and suggest any health considerations. Be thorough in your analysis."
+                      text: "Analyze this food image in detail. What foods are present? Provide nutritional information."
                     },
                     {
                       type: "image_url",
                       image_url: {
-                        url: 'data:image/jpeg;base64,' + base64Image
+                        url: `data:image/jpeg;base64,${base64Image}`
                       }
                     }
                   ]
                 }
               ],
-              max_tokens: 500
+              max_tokens: 800
             });
             
-            imageAnalysis = visionResponse.choices[0].message.content;
+            // Check if we have a valid response
+            if (!visionResponse || !visionResponse.choices || visionResponse.choices.length === 0 || !visionResponse.choices[0].message) {
+              console.error('Received invalid response from vision API');
+              throw new Error('Failed to analyze image: Received invalid response from AI vision service');
+            }
+            
+            imageAnalysis = visionResponse.choices[0].message.content || 'Unable to analyze the image contents properly';
           } else {
             // Format the food analysis result into a readable message
             const foodItems = foodAnalysis.foodItems;
@@ -271,7 +277,7 @@ const chatService = {
       const messages = [
         {
           role: "system",
-          content: systemPrompt
+          content: systemPrompt + (options.imageUrl ? '\n\nIMPORTANT: The user has shared an image of food which you CAN see and analyze. DO NOT say you cannot see or analyze images - you have all the information about the image provided to you in this system message. Analyze the image contents based on the image description provided.' : '')
         }
       ];
 

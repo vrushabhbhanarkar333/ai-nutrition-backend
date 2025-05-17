@@ -1,5 +1,6 @@
 const OpenAI = require('openai');
 const cloudinary = require('cloudinary').v2;
+const axios = require('axios');
 require('dotenv').config();
 
 // Configure Cloudinary with credentials from environment variables
@@ -7,6 +8,13 @@ cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'dfhvvyzk2',
   api_key: process.env.CLOUDINARY_API_KEY || '654937611297122',
   api_secret: process.env.CLOUDINARY_API_SECRET || 'Es7BSt9VzeqCOrqOxEmz4VtSKWE'
+});
+
+// Log Cloudinary configuration for debugging (but hide sensitive parts)
+console.log('Cloudinary Configuration:', {
+  cloud_name: process.env.CLOUDINARY_CLOUD_NAME || 'NOT_SET',
+  api_key: process.env.CLOUDINARY_API_KEY ? 'PRESENT' : 'NOT_SET',
+  api_secret: process.env.CLOUDINARY_API_SECRET ? 'PRESENT' : 'NOT_SET'
 });
 
 // Upload image to Cloudinary
@@ -44,6 +52,20 @@ const uploadImage = async (fileBuffer, folder = 'uploads') => {
   }
 };
 
+// Fetch image from URL and convert to base64
+const imageUrlToBase64 = async (imageUrl) => {
+  try {
+    console.log('Fetching image from URL:', imageUrl);
+    const response = await axios.get(imageUrl, { responseType: 'arraybuffer' });
+    const base64Image = Buffer.from(response.data, 'binary').toString('base64');
+    const mimeType = response.headers['content-type'] || 'image/jpeg';
+    return `data:${mimeType};base64,${base64Image}`;
+  } catch (error) {
+    console.error('Error converting image URL to base64:', error);
+    throw new Error(`Failed to convert image URL to base64: ${error.message}`);
+  }
+};
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -63,25 +85,25 @@ const foodService = {
       // Use OpenAI API for food recognition and nutrition analysis
       console.log('Calling OpenAI API for food recognition and nutrition analysis...');
       
-      // Try with GPT-4 Vision first
-      let model = 'gpt-4-vision-preview';
+      // Try with GPT-4o first, fall back to GPT-3.5-turbo if needed
+      let model = 'gpt-4o';
       let response;
       
       try {
-        console.log('Attempting to use GPT-4 Vision model...');
+        console.log('Attempting to use GPT-4o model...');
         response = await openai.chat.completions.create({
           model: model,
           messages: [
-            {
-              role: 'system',
-              content: 'You are a nutrition analysis assistant. Analyze food images and provide detailed nutritional information in JSON format.'
-            },
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'text',
-                  text: `Analyze the food items in this image and provide detailed nutritional information.
+          {
+            role: 'system',
+            content: 'You are a nutrition analysis assistant. Analyze food images and provide detailed nutritional information in JSON format.'
+          },
+          {
+            role: 'user',
+            content: [
+              {
+                type: 'text',
+                text: `Analyze the food items in this image and provide detailed nutritional information.
 
 1. Identify all food items visible in the image.
 2. For each identified food item, provide the following nutritional information for a standard serving size of 100g:
@@ -109,22 +131,22 @@ Format your response as a valid JSON object with this exact structure:
 }
 
 Include only this JSON in your response.`
-                },
-                {
-                  type: 'image_url',
-                  image_url: {
-                    url: cloudinaryResult.url
-                  }
+              },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: cloudinaryResult.url
                 }
-              ]
-            }
-          ],
-          max_tokens: 1000,
-          response_format: { type: "json_object" }
-        });
-        console.log('GPT-4 Vision model response received successfully');
+              }
+            ]
+          }
+        ],
+        max_tokens: 1000,
+        response_format: { type: "json_object" }
+      });
+        console.log('GPT-4o model response received successfully');
       } catch (modelError) {
-        console.error('Error with GPT-4 Vision model:', modelError);
+        console.error('Error with GPT-4o model:', modelError);
         console.log('Falling back to GPT-3.5-turbo...');
         model = 'gpt-3.5-turbo-0125';
         
@@ -185,14 +207,35 @@ Include only this JSON in your response.`
       }
 
       console.log(`Successfully used model: ${model}`);
-      const responseText = response.choices[0].message.content.trim();
+      
+      // Check if response or response.choices are null or empty
+      if (!response || !response.choices || response.choices.length === 0) {
+        console.error('Received empty response from OpenAI API');
+        return {
+          error: true,
+          message: "Received empty response from OpenAI API",
+          foodItems: [],
+          totalCalories: 0,
+          imageUrl: cloudinaryResult?.url,
+          imagePublicId: cloudinaryResult?.public_id,
+          timestamp: new Date().toISOString(),
+        };
+      }
+      
+      const responseText = response.choices[0].message.content?.trim() || '';
       console.log('OpenAI API response:', responseText);
 
       // Safely parse JSON with error handling
       let nutritionData;
       try {
-        nutritionData = JSON.parse(responseText);
-        console.log('Successfully parsed nutrition data:', nutritionData);
+        // Check if the response is valid JSON first
+        if (responseText && (responseText.startsWith('{') || responseText.startsWith('['))) {
+          nutritionData = JSON.parse(responseText);
+          console.log('Successfully parsed nutrition data:', nutritionData);
+        } else {
+          console.error('Invalid JSON response format:', responseText);
+          nutritionData = { foodItems: [] };
+        }
       } catch (jsonError) {
         console.error('Error parsing JSON response:', jsonError);
         console.error('Raw response:', responseText);
