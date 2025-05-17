@@ -147,6 +147,7 @@ const userController = {
         data: {
           id: user._id,
           username: user.username,
+          name: user.name,
           email: user.email,
           dailyStepGoal: user.dailyStepGoal,
           preferences: user.preferences,
@@ -164,7 +165,7 @@ const userController = {
 
   updateProfile: async (req, res) => {
     try {
-      const { username, dailyStepGoal, preferences } = req.body;
+      const { username, dailyStepGoal, preferences, name } = req.body;
       const userId = req.user._id;
 
       // Find user and update
@@ -179,6 +180,7 @@ const userController = {
 
       // Update fields
       if (username) user.username = username;
+      if (name) user.name = name;
       if (dailyStepGoal) user.dailyStepGoal = dailyStepGoal;
       if (preferences) user.preferences = preferences;
 
@@ -190,6 +192,7 @@ const userController = {
         data: {
           id: user._id,
           username: user.username,
+          name: user.name,
           email: user.email,
           dailyStepGoal: user.dailyStepGoal,
           preferences: user.preferences
