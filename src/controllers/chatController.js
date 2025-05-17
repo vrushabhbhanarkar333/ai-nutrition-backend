@@ -8,8 +8,8 @@ const { processMessageEmbedding } = require('../services/embeddingService');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
-    // Use absolute path to ensure files are saved in the correct location
-    const uploadPath = path.join('d:/freelance_project/ai-nutrition-backend/uploads/chat-images');
+    // Use relative path to ensure files are saved in the correct location
+    const uploadPath = path.join(__dirname, '../../uploads/chat-images');
     console.log('Upload destination path:', uploadPath);
     cb(null, uploadPath);
   },
