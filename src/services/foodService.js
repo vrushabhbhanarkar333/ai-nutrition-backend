@@ -12,13 +12,23 @@ cloudinary.config({
 // Upload image to Cloudinary
 const uploadImage = async (fileBuffer, folder = 'uploads') => {
   try {
+    console.log('Starting Cloudinary upload...');
     // Convert buffer to base64 string for Cloudinary upload
     const base64String = `data:image/jpeg;base64,${fileBuffer.toString('base64')}`;
+    console.log('Image converted to base64, length:', base64String.length);
     
     // Upload to Cloudinary
     const result = await cloudinary.uploader.upload(base64String, {
       folder: folder,
       resource_type: 'image'
+    });
+    
+    console.log('Cloudinary upload successful:', {
+      public_id: result.public_id,
+      url: result.secure_url,
+      format: result.format,
+      width: result.width,
+      height: result.height
     });
     
     return {
@@ -40,39 +50,38 @@ const openai = new OpenAI({
 
 const foodService = {
   analyzeFood: async (imageBuffer) => {
+    let cloudinaryResult;
     try {
       console.log('Starting food analysis...');
+      console.log('Image buffer size:', imageBuffer.length);
 
       // Upload image to Cloudinary
       console.log('Uploading image to Cloudinary...');
-      const cloudinaryResult = await uploadImage(imageBuffer, 'food-analysis');
+      cloudinaryResult = await uploadImage(imageBuffer, 'food-analysis');
       console.log('Image uploaded to Cloudinary:', cloudinaryResult.url);
-
-      // Convert image buffer to base64 for OpenAI
-      const base64Image = imageBuffer.toString('base64');
-      console.log('Image converted to base64, length:', base64Image.length);
 
       // Use OpenAI API for food recognition and nutrition analysis
       console.log('Calling OpenAI API for food recognition and nutrition analysis...');
       
-      // Try with GPT-4o first, fall back to GPT-3.5-turbo if needed
-      let model = 'gpt-4o';
+      // Try with GPT-4 Vision first
+      let model = 'gpt-4-vision-preview';
       let response;
       
       try {
+        console.log('Attempting to use GPT-4 Vision model...');
         response = await openai.chat.completions.create({
           model: model,
           messages: [
-          {
-            role: 'system',
-            content: 'You are a nutrition analysis assistant. Analyze food images and provide detailed nutritional information in JSON format.'
-          },
-          {
-            role: 'user',
-            content: [
-              {
-                type: 'text',
-                text: `Analyze the food items in this image and provide detailed nutritional information.
+            {
+              role: 'system',
+              content: 'You are a nutrition analysis assistant. Analyze food images and provide detailed nutritional information in JSON format.'
+            },
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: `Analyze the food items in this image and provide detailed nutritional information.
 
 1. Identify all food items visible in the image.
 2. For each identified food item, provide the following nutritional information for a standard serving size of 100g:
@@ -100,21 +109,23 @@ Format your response as a valid JSON object with this exact structure:
 }
 
 Include only this JSON in your response.`
-              },
-              {
-                type: 'image_url',
-                image_url: {
-                  url: cloudinaryResult.url
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: cloudinaryResult.url
+                  }
                 }
-              }
-            ]
-          }
-        ],
-        max_tokens: 1000,
-        response_format: { type: "json_object" }
-      });
+              ]
+            }
+          ],
+          max_tokens: 1000,
+          response_format: { type: "json_object" }
+        });
+        console.log('GPT-4 Vision model response received successfully');
       } catch (modelError) {
-        console.log(`Error with model ${model}, falling back to gpt-3.5-turbo:`, modelError.message);
+        console.error('Error with GPT-4 Vision model:', modelError);
+        console.log('Falling back to GPT-3.5-turbo...');
         model = 'gpt-3.5-turbo-0125';
         
         response = await openai.chat.completions.create({
@@ -170,6 +181,7 @@ Include only this JSON in your response.`
           max_tokens: 1000,
           response_format: { type: "json_object" }
         });
+        console.log('GPT-3.5-turbo model response received successfully');
       }
 
       console.log(`Successfully used model: ${model}`);
@@ -180,6 +192,7 @@ Include only this JSON in your response.`
       let nutritionData;
       try {
         nutritionData = JSON.parse(responseText);
+        console.log('Successfully parsed nutrition data:', nutritionData);
       } catch (jsonError) {
         console.error('Error parsing JSON response:', jsonError);
         console.error('Raw response:', responseText);
@@ -189,6 +202,7 @@ Include only this JSON in your response.`
       }
 
       if (!nutritionData.foodItems || nutritionData.foodItems.length === 0) {
+        console.log('No food items identified in the image');
         return {
           error: true,
           message: "Could not identify any specific food items in the image. Please try with a clearer image of food.",
@@ -202,6 +216,7 @@ Include only this JSON in your response.`
 
       const totalCalories = nutritionData.foodItems.reduce((sum, item) => sum + item.calories, 0);
       console.log('Total calories:', totalCalories);
+      console.log('Food items identified:', nutritionData.foodItems);
 
       return {
         error: false,

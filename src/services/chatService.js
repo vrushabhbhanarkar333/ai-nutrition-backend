@@ -156,128 +156,118 @@ const chatService = {
       };
 
       // 5. Enhanced system prompt with comprehensive context
-      const systemPrompt = `You are a nutrition and fitness assistant with access to comprehensive user data and conversation history.
+      const systemPrompt = 'You are a nutrition and fitness assistant with access to comprehensive user data and conversation history.\n\n' +
+        'IMPORTANT: When users ask about their profile, ALWAYS include ALL of the following information in your response:\n' +
+        '1. Basic Information:\n' +
+        '   - Name: ' + userData.profile.basicInfo.name + '\n' +
+        '   - Email: ' + userData.profile.basicInfo.email + '\n' +
+        '   - Username: ' + userData.profile.basicInfo.username + '\n\n' +
+        '2. Physical Metrics:\n' +
+        '   - Height: ' + userData.profile.physicalMetrics.height + ' cm\n' +
+        '   - Weight: ' + userData.profile.physicalMetrics.weight + ' kg\n' +
+        '   - BMI: ' + userData.profile.physicalMetrics.bmi + '\n' +
+        '   - Age: ' + userData.profile.physicalMetrics.age + '\n' +
+        '   - Gender: ' + userData.profile.physicalMetrics.gender + '\n\n' +
+        '3. Fitness Information:\n' +
+        '   - Fitness Goal: ' + userData.profile.fitnessInfo.fitness_goal + '\n' +
+        '   - Activity Level: ' + userData.profile.fitnessInfo.activity_level + '\n' +
+        '   - Dietary Restrictions: ' + userData.profile.fitnessInfo.dietary_restrictions.join(', ') + '\n\n' +
+        '4. Profile Timestamps:\n' +
+        '   - Created: ' + userData.profile.timestamps.createdAt + '\n' +
+        '   - Last Updated: ' + userData.profile.timestamps.updatedAt + '\n\n' +
+        'When users ask about their meals, calorie counts, or nutrition data, ALWAYS include the relevant meal data in your response. If a user asks about their calorie count for today or the past week, you MUST provide this information from the meal data provided below.\n\n' +
+        '1. Data Integration and Context:\n' +
+        '   - Health Data: ' + JSON.stringify(userData.healthData) + '\n' +
+        '   - Stats Data: ' + JSON.stringify(userData.statsData) + '\n' +
+        '   - Dietary Preferences: ' + JSON.stringify(userData.dietaryPreferences) + '\n' +
+        '   - Recent Activities: ' + JSON.stringify(userData.recentActivities) + '\n\n' +
+        '2. MEAL DATA (CRITICAL FOR NUTRITION QUESTIONS):\n' +
+        '   - Recent Meals (last 7 days): ' + JSON.stringify(userData.mealData.recentMeals) + '\n' +
+        '   - Daily Calorie Summary: ' + JSON.stringify(userData.mealData.dailySummary) + '\n' +
+        '   - Average Daily Calories: ' + userData.mealData.averageDailyCalories + '\n' +
+        '   - Total Calories Last Week: ' + userData.mealData.totalCaloriesLastWeek + '\n\n' +
+        '3. Conversation Context:\n' +
+        '   - Previous Conversations: ' + JSON.stringify(await fetchChatHistory(options.conversationId)) + '\n' +
+        '   - Notification History: ' + JSON.stringify(await fetchNotificationHistory(userId)) + '\n\n' +
+        '4. Image Analysis Context:\n' +
+        '   ' + (options.imageUrl ? 'An image has been provided for analysis. Please provide detailed nutritional information about the food items visible in the image.' : 'No image provided.');
 
-IMPORTANT: When users ask about their profile, ALWAYS include ALL of the following information in your response:
-1. Basic Information:
-   - Name: ${userData.profile.basicInfo.name}
-   - Email: ${userData.profile.basicInfo.email}
-   - Username: ${userData.profile.basicInfo.username}
+      // Process image if provided
+      let imageAnalysis = null;
+      let foodAnalysis = null;
+      if (options.imageUrl) {
+        try {
+          // Get the full path to the image
+          const imagePath = path.join(__dirname, '../../', options.imageUrl);
+          console.log('Processing image at path:', imagePath);
+          
+          // Check if file exists
+          if (!fs.existsSync(imagePath)) {
+            console.error('Image file not found:', imagePath);
+            throw new Error('Image file not found');
+          }
+          
+          // Read the image file
+          const imageBuffer = fs.readFileSync(imagePath);
+          console.log('Image buffer size:', imageBuffer.length);
+          
+          // Analyze the food using the food service
+          console.log('Calling food service to analyze image...');
+          foodAnalysis = await foodService.analyzeFood(imageBuffer);
+          console.log('Food analysis result:', JSON.stringify(foodAnalysis));
+          
+          if (foodAnalysis.error) {
+            console.log('Food analysis returned an error, falling back to vision API');
+            
+            // If food analysis failed, fall back to Vision API
+            const base64Image = imageBuffer.toString('base64');
+            
+            // Get image description from OpenAI Vision API
+            const visionResponse = await openai.chat.completions.create({
+              model: "gpt-4-vision-preview",
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    {
+                      type: "text",
+                      text: "Analyze this food image in detail. Describe what you see, identify the foods, estimate nutritional content, and suggest any health considerations. Be thorough in your analysis."
+                    },
+                    {
+                      type: "image_url",
+                      image_url: {
+                        url: 'data:image/jpeg;base64,' + base64Image
+                      }
+                    }
+                  ]
+                }
+              ],
+              max_tokens: 500
+            });
+            
+            imageAnalysis = visionResponse.choices[0].message.content;
+          } else {
+            // Format the food analysis result into a readable message
+            const foodItems = foodAnalysis.foodItems;
+            let analysisText = "I've analyzed your food image and identified the following items:\n\n";
+            
+            foodItems.forEach(item => {
+              analysisText += item.name + ': ' + item.calories + ' calories per 100g. ';
+              analysisText += 'Contains ' + item.protein + 'g protein, ' + item.carbs + 'g carbs, ' + item.fat + 'g fat, and ' + item.fiber + 'g fiber. ';
+              analysisText += 'This food is generally considered ' + (item.isHealthy ? 'healthy' : 'less healthy') + '.\n\n';
+            });
+            
+            analysisText += 'Total estimated calories: ' + foodAnalysis.totalCalories;
+            
+            imageAnalysis = analysisText;
+          }
+        } catch (error) {
+          console.error('Error processing image:', error);
+          imageAnalysis = "I apologize, but I encountered an error while analyzing the image. Please try again with a different image or describe the food items you'd like me to analyze.";
+        }
+      }
 
-2. Physical Metrics:
-   - Height: ${userData.profile.physicalMetrics.height} cm
-   - Weight: ${userData.profile.physicalMetrics.weight} kg
-   - BMI: ${userData.profile.physicalMetrics.bmi}
-   - Age: ${userData.profile.physicalMetrics.age}
-   - Gender: ${userData.profile.physicalMetrics.gender}
-
-3. Fitness Information:
-   - Fitness Goal: ${userData.profile.fitnessInfo.fitness_goal}
-   - Activity Level: ${userData.profile.fitnessInfo.activity_level}
-   - Dietary Restrictions: ${userData.profile.fitnessInfo.dietary_restrictions.join(', ')}
-
-4. Profile Timestamps:
-   - Created: ${userData.profile.timestamps.createdAt}
-   - Last Updated: ${userData.profile.timestamps.updatedAt}
-
-When users ask about their meals, calorie counts, or nutrition data, ALWAYS include the relevant meal data in your response. If a user asks about their calorie count for today or the past week, you MUST provide this information from the meal data provided below.
-
-1. Data Integration and Context:
-   - Health Data: ${JSON.stringify(userData.healthData)}
-   - Stats Data: ${JSON.stringify(userData.statsData)}
-   - Dietary Preferences: ${JSON.stringify(userData.dietaryPreferences)}
-   - Recent Activities: ${JSON.stringify(userData.recentActivities)}
-
-2. MEAL DATA (CRITICAL FOR NUTRITION QUESTIONS):
-   - Recent Meals (last 7 days): ${JSON.stringify(userData.mealData.recentMeals)}
-   - Daily Calorie Summary: ${JSON.stringify(userData.mealData.dailySummary)}
-   - Average Daily Calories: ${userData.mealData.averageDailyCalories}
-   - Total Calories Last Week: ${userData.mealData.totalCaloriesLastWeek}
-
-3. Conversation Context:
-   - Previous Conversations: ${JSON.stringify(await fetchChatHistory(options.conversationId))}
-   - Notification History: ${JSON.stringify(await fetchNotificationHistory(userId))}
-
-4. Question Analysis:
-   - Type: ${questionAnalysis.type}
-   - Intent: ${questionAnalysis.intent}
-   - Relevant Data Types: ${questionAnalysis.relevantDataTypes.join(', ')}
-   - Is Meal Related: ${questionAnalysis.isMealRelated}
-   - Context: ${questionAnalysis.context || 'general'}
-
-5. MEAL DATA INSTRUCTIONS (CRITICAL):
-   - When asked about meals or calories, ALWAYS include specific meal data in your response
-   - For "recent meals" questions, list the most recent meals with dates, types, and calories
-   - For "calorie count" questions, provide exact numbers from the meal data
-   - For "today's calories" or "yesterday's calories", use the most recent day in the data
-   - For "last 7 days calories", list the daily calorie totals from the dailySummary
-   - ALWAYS mention the average daily calorie count when discussing calorie trends
-   - When asked about nutrition improvements, compare current intake to dietary goals
-
-6. Response Guidelines:
-   - Combine user data with general nutrition/fitness knowledge
-   - Reference specific metrics from user's history
-   - Connect current question with previous interactions
-   - Consider notification context if applicable
-   - Maintain conversation flow and context
-   - Provide actionable, personalized advice
-   - Use both specific user data and general knowledge
-   - Keep responses concise but comprehensive
-
-7. Data Integration Strategy:
-   - Primary Data Sources:
-     * User's personal metrics and history
-     * Previous conversation context
-     * Notification questions and responses
-     * Recent activities and progress
-     * Meal data and calorie information
-   - Secondary Knowledge:
-     * General nutrition principles
-     * Fitness best practices
-     * Health guidelines
-     * Scientific research
-
-8. Context Awareness:
-   - Track conversation threads
-   - Reference previous notification questions
-   - Consider user's progress over time
-   - Maintain awareness of user's goals
-   - Connect related topics across conversations
-
-9. Response Structure:
-   - Acknowledge user's specific situation
-   - Reference relevant historical data
-   - Provide personalized advice
-   - Include actionable next steps
-   - Connect with previous interactions
-   - Maintain conversation continuity
-
-Remember to:
-1. ALWAYS include ALL profile information when asked about the user's profile
-2. ALWAYS include meal data when responding to nutrition questions
-3. Reference specific data points when relevant
-4. Connect current questions with past interactions
-5. Balance personal data with general knowledge
-6. Maintain conversation flow and context
-7. Provide practical, actionable advice
-
-IMPORTANT: When users ask about their step count, ALWAYS include the following information in your response:
-1. Current Step Count:
-   - Today's steps: ${userData.stepCount?.current || 0}
-   - Daily goal: ${userData.profile?.dailyStepGoal || 10000}
-   - Progress percentage: ${((userData.stepCount?.current || 0) / (userData.profile?.dailyStepGoal || 10000) * 100).toFixed(1)}%
-
-2. Step Count Trend (Last 7 Days):
-   - Average steps: ${userData.stepCount?.average || 0}
-   - Total steps: ${userData.stepCount?.total || 0}
-   - Days tracked: ${userData.stepCount?.days || 0}
-
-3. Step Count Analysis:
-   - Goal achievement: ${userData.stepCount?.goalAchievement || 'Not tracked'}
-   - Trend direction: ${userData.stepCount?.trend || 'Not tracked'}
-   - Recommendations: ${userData.stepCount?.recommendations || 'Not tracked'}`;
-
-      // Initialize messages array with system message
+      // Create messages array for chat completions API
       const messages = [
         {
           role: "system",
@@ -285,120 +275,35 @@ IMPORTANT: When users ask about their step count, ALWAYS include the following i
         }
       ];
 
-      // 6. Add relevant historical data based on question analysis
-      if (questionAnalysis.relevantDataTypes.includes('conversation_history')) {
-        const history = await fetchChatHistory(options.conversationId);
-        if (history.length > 0) {
-          messages.push({
-            role: "system",
-            content: "Relevant conversation history:"
-          });
-          history.forEach(msg => {
-            messages.push({
-              role: msg.isAI ? "assistant" : "user",
-              content: msg.message
-            });
-          });
-        }
-      }
-
-      // 7. Add notification history if relevant
-      if (questionAnalysis.isNotificationRelated) {
-        const notificationHistory = await fetchNotificationHistory(userId);
-        if (notificationHistory.length > 0) {
-          messages.push({
-            role: "system",
-            content: "Relevant notification history:"
-          });
-          notificationHistory.forEach(notification => {
-            messages.push({
-              role: "system",
-              content: `Notification: ${notification.question}\nResponse: ${notification.answer}`
-            });
-          });
-        }
-      }
-
-      // 8. Add similar messages from vector search
-      const similarMessages = await findSimilarMessages(userId, message, 3);
-      if (similarMessages.length > 0) {
+      // Add image analysis to the conversation if available
+      if (imageAnalysis) {
         messages.push({
           role: "system",
-          content: "Similar previous interactions:"
-        });
-        similarMessages.forEach(m => {
-          messages.push({
-            role: m.is_ai ? "assistant" : "user",
-            content: m.message
-          });
+          content: 'I\'ve analyzed the image the user shared. Here\'s what I can see: ' + imageAnalysis
         });
       }
 
-      // 9. Add the current user message with context
+      // Add user message
       messages.push({
         role: "user",
         content: message
       });
 
-      // 10. Get AI response with comprehensive context
-      const response = await openai.chat.completions.create({
-        model: "gpt-3.5-turbo",
+      // Get AI response
+      const completion = await openai.chat.completions.create({
+        model: "gpt-4",
         messages: messages,
-        max_tokens: 500,
+        max_tokens: 1000,
         temperature: 0.7
       });
 
-      // Process and clean the response
-      let cleanedResponse = response.choices[0].message.content.trim();
-      cleanedResponse = cleanedResponse
-        .replace(/\*\*(.*?)\*\*/g, '$1')
-        .replace(/\*(.*?)\*/g, '$1')
-        .replace(/^#+\s+/gm, '')
-        .replace(/^[-*+]\s+/gm, '• ')
-        .replace(/`([^`]+)`/g, '$1');
+      const aiResponse = completion.choices[0].message.content;
 
-      // Store the interaction in vector database
-      await processMessageEmbedding(
-        userId,
-        options.conversationId,
-        options.messageId || Date.now().toString(),
-        message,
-        false,
-        messageMetadata,
-        messageContext
-      );
-
-      await processMessageEmbedding(
-        userId,
-        options.conversationId,
-        (Date.now() + 1).toString(),
-        cleanedResponse,
-        true,
-        {
-          ...messageMetadata,
-          response_to_message_id: options.messageId || '',
-          response_type: 'ai_assistant',
-          response_quality: 'high'
-        },
-        {
-          ...messageContext,
-          response_context: JSON.stringify({
-            model: 'gpt-3.5-turbo',
-            temperature: 0.7,
-            max_tokens: 500
-          })
-        }
-      );
-
+      // Return the response with image analysis if available
       return {
-        message: cleanedResponse,
-        questionAnalysis,
-        relevantData: {
-          userProfile: userData.profile,
-          healthData: userData.healthData,
-          statsData: userData.statsData,
-          mealData: userData.mealData
-        }
+        message: aiResponse,
+        imageAnalysis: imageAnalysis,
+        foodAnalysis: foodAnalysis
       };
 
     } catch (error) {
@@ -777,17 +682,15 @@ const getProfileContext = async (userId, query) => {
     const profileInfo = await findRelevantProfileInfo(userId, query);
     if (profileInfo && profileInfo.length > 0) {
       const profile = profileInfo[0];
-      return `
-User Profile Information:
-- Height: ${profile.height} cm
-- Weight: ${profile.weight} kg
-- BMI: ${profile.bmi}
-- Age: ${profile.age}
-- Gender: ${profile.gender}
-- Fitness Goal: ${profile.fitness_goal}
-- Activity Level: ${profile.activity_level}
-- Dietary Restrictions: ${profile.dietary_restrictions.join(', ')}
-`;
+      return 'User Profile Information:\n' +
+        '- Height: ' + profile.height + ' cm\n' +
+        '- Weight: ' + profile.weight + ' kg\n' +
+        '- BMI: ' + profile.bmi + '\n' +
+        '- Age: ' + profile.age + '\n' +
+        '- Gender: ' + profile.gender + '\n' +
+        '- Fitness Goal: ' + profile.fitness_goal + '\n' +
+        '- Activity Level: ' + profile.activity_level + '\n' +
+        '- Dietary Restrictions: ' + profile.dietary_restrictions.join(', ') + '\n';
     }
     return '';
   } catch (error) {
@@ -803,11 +706,9 @@ const processChatMessage = async (userId, message) => {
     const profileContext = await getProfileContext(userId, message);
     
     // Add profile context to the system message
-    const systemMessage = `You are a helpful AI nutrition and fitness assistant. Use the following user profile information to provide personalized responses:
-
-${profileContext}
-
-Please provide accurate and helpful responses based on the user's profile and their questions.`;
+    const systemMessage = 'You are a helpful AI nutrition and fitness assistant. Use the following user profile information to provide personalized responses:\n\n' +
+      profileContext +
+      'Please provide accurate and helpful responses based on the user\'s profile and their questions.';
 
     // ... rest of your existing chat processing code ...
     // Make sure to include the systemMessage in your OpenAI API call
@@ -824,7 +725,7 @@ function getStepCountRecommendations(currentSteps, averageSteps, dailyGoal) {
   
   if (currentSteps < dailyGoal) {
     const remainingSteps = dailyGoal - currentSteps;
-    recommendations.push(`You need ${remainingSteps} more steps to reach your daily goal.`);
+    recommendations.push('You need ' + remainingSteps + ' more steps to reach your daily goal.');
     
     if (remainingSteps > 1000) {
       recommendations.push('Consider taking a longer walk or doing some light exercise.');

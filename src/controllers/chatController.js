@@ -169,8 +169,30 @@ const chatController = {
             foodAnalysisItems: response.foodAnalysis ? response.foodAnalysis.foodItems.length : 0
           });
 
+          // If we have food analysis results, enhance the AI response
+          let enhancedResponse = response.message;
+          if (response.foodAnalysis && response.foodAnalysis.foodItems && response.foodAnalysis.foodItems.length > 0) {
+            const foodItems = response.foodAnalysis.foodItems;
+            let analysisText = "\n\nHere's a detailed nutritional analysis of the food items I can see:\n\n";
+            
+            foodItems.forEach(item => {
+              analysisText += `• ${item.name}:\n`;
+              analysisText += `  - Calories: ${item.calories} per 100g\n`;
+              analysisText += `  - Protein: ${item.protein}g\n`;
+              analysisText += `  - Carbs: ${item.carbs}g\n`;
+              analysisText += `  - Fat: ${item.fat}g\n`;
+              analysisText += `  - Fiber: ${item.fiber}g\n`;
+              analysisText += `  - Health Rating: ${item.isHealthy ? 'Healthy' : 'Less Healthy'}\n\n`;
+            });
+            
+            analysisText += `Total estimated calories: ${response.foodAnalysis.totalCalories}\n\n`;
+            analysisText += "Would you like me to provide any specific nutritional advice based on this analysis?";
+            
+            enhancedResponse = response.message + analysisText;
+          }
+
           // Clean response of any markdown formatting that might have slipped through
-          let cleanedResponse = response.message
+          let cleanedResponse = enhancedResponse
             .replace(/\*\*(.*?)\*\*/g, '$1') // Remove bold formatting
             .replace(/\*(.*?)\*/g, '$1')     // Remove italic formatting
             .replace(/^#+\s+/gm, '')         // Remove heading markers
@@ -184,7 +206,9 @@ const chatController = {
             parentMessageId: userMessage._id.toString(),
             message: cleanedResponse,
             isAI: true,
-            isEmbedded: false // Mark for embedding processing
+            isEmbedded: false, // Mark for embedding processing
+            imageAnalysis: response.imageAnalysis,
+            foodAnalysis: response.foodAnalysis
           });
           await aiMessage.save();
           
