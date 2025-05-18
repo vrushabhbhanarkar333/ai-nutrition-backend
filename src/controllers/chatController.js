@@ -91,7 +91,31 @@ const chatController = {
         }
 
         // Create or continue conversation
-        const currentConversationId = conversationId || uuidv4();
+        let currentConversationId;
+        
+        if (conversationId) {
+          // If a conversationId is provided, use it
+          currentConversationId = conversationId;
+        } else {
+          // Check if the user has any existing conversations
+          const existingConversations = await Chat.distinct('conversationId', { userId });
+          
+          if (existingConversations.length > 0) {
+            // Use the most recent conversation
+            const latestMessage = await Chat.findOne({ userId, conversationId: { $in: existingConversations } })
+              .sort({ createdAt: -1 })
+              .limit(1);
+              
+            if (latestMessage) {
+              currentConversationId = latestMessage.conversationId;
+            } else {
+              currentConversationId = uuidv4();
+            }
+          } else {
+            // No existing conversations, create a new one
+            currentConversationId = uuidv4();
+          }
+        }
         
         // Debug: Log conversation details
         logRequest(`${ENDPOINT_SEND}/conversation`, {
@@ -361,12 +385,27 @@ const chatController = {
       // First get the list of conversation IDs
       const conversationIds = await Chat.distinct('conversationId', query);
       
+      // Get the most recent message from each conversation to sort conversations by recency
+      const conversationLastMessages = await Promise.all(
+        conversationIds.map(async (convId) => {
+          const lastMessage = await Chat.findOne({ ...query, conversationId: convId })
+            .sort({ createdAt: -1 })
+            .limit(1)
+            .lean();
+          return { conversationId: convId, lastMessageTime: lastMessage ? lastMessage.createdAt : new Date(0) };
+        })
+      );
+      
+      // Sort conversations by most recent message (newest first)
+      const sortedConversationIds = conversationLastMessages
+        .sort((a, b) => b.lastMessageTime - a.lastMessageTime)
+        .map(item => item.conversationId);
+      
       // Then get messages for each conversation, sorted chronologically
       let messages = [];
-      for (const convId of conversationIds) {
+      for (const convId of sortedConversationIds) {
         const convMessages = await Chat.find({ ...query, conversationId: convId })
           .sort({ createdAt: 1 }) // Sort chronologically (oldest first) for proper conversation flow
-          .limit(parseInt(limit))
           .lean();
         
         messages = [...messages, ...convMessages];
