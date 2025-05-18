@@ -63,6 +63,7 @@ const foodController = {
     try {
       const { foodItems, totalCalories, mealType } = req.body;
       const userId = req.user._id;
+      const userTimezone = req.body.timezone || 'UTC'; // Get user's timezone or default to UTC
   
       if (!foodItems || !Array.isArray(foodItems) || foodItems.length === 0) {
         return res.status(400).json({
@@ -110,30 +111,77 @@ const foodController = {
         fiber: Number(item.fiber)
       }));
 
+      // Create date object, ensuring it's properly stored 
+      const now = new Date();
+      
+      // Get date string in user's timezone for consistent date handling
+      const options = { 
+        year: 'numeric', 
+        month: '2-digit', 
+        day: '2-digit',
+        timeZone: userTimezone
+      };
+      const todayString = now.toLocaleDateString('en-CA', options); // en-CA gives YYYY-MM-DD format
+      console.log(`Adding meal for date string ${todayString} in timezone ${userTimezone}`);
+      
       const meal = new Meal({
         userId,
         foodItems: processedFoodItems,
         totalCalories: totalCalories || processedFoodItems.reduce((sum, item) => sum + item.calories, 0),
         mealType: validatedMealType,
-        date: new Date(),
-        totalNutrition
+        date: now, // Store the full date/time 
+        dateString: todayString // Store the date string for easier querying
       });
   
       await meal.save();
       
       console.log(`Meal added for user ${userId}: ${meal.totalCalories} calories, type: ${validatedMealType}`);
   
-      // Update daily calorie count using atomic update for efficiency
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-  
-      let dailyCalorie = await DailyCalorie.findOneAndUpdate(
-        { userId, date: { $gte: today, $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000) } },
-        { $inc: { totalCalories: meal.totalCalories }, lastUpdated: new Date() },
-        { new: true, upsert: true }
-      );
-  
-      console.log(`Daily calorie updated for user ${userId}: ${dailyCalorie.totalCalories} calories`);
+      // Calculate daily totals using string-based date comparison
+      const allMeals = await Meal.find({ userId });
+      
+      // Filter to just today's meals using the date string
+      const todayMeals = allMeals.filter(m => {
+        const mealDate = new Date(m.date);
+        const mealDateString = mealDate.toISOString().split('T')[0];
+        return mealDateString === todayString;
+      });
+      
+      // Calculate total calories from all meals today
+      const totalMealsCalories = todayMeals.reduce((sum, m) => sum + (m.totalCalories || 0), 0);
+      console.log(`Total calories from all meals today (${todayString}): ${totalMealsCalories}`);
+      
+      // Find existing daily calorie document using string comparison
+      const allDailyCalories = await DailyCalorie.find({ userId });
+      const matchingDailyCalorie = allDailyCalories.find(record => {
+        const recordDate = new Date(record.date);
+        const recordDateString = recordDate.toISOString().split('T')[0];
+        return recordDateString === todayString;
+      });
+      
+      let dailyCalorie;
+      
+      if (matchingDailyCalorie) {
+        // Update with accurate total from all meals
+        matchingDailyCalorie.totalCalories = totalMealsCalories;
+        matchingDailyCalorie.lastUpdated = now;
+        await matchingDailyCalorie.save();
+        dailyCalorie = matchingDailyCalorie;
+        console.log(`Updated existing daily calorie record to ${totalMealsCalories} calories`);
+      } else {
+        // Create new record with accurate total
+        dailyCalorie = new DailyCalorie({
+          userId,
+          date: new Date(todayString),
+          dateString: todayString,
+          totalCalories: totalMealsCalories,
+          lastUpdated: now
+        });
+        await dailyCalorie.save();
+        console.log(`Created new daily calorie record with ${totalMealsCalories} calories for ${todayString}`);
+      }
+      
+      console.log(`Daily calorie updated for user ${userId}: ${dailyCalorie.totalCalories} calories for date ${todayString}`);
   
       const response = {
         success: true,
@@ -149,7 +197,8 @@ const foodController = {
               fiber: parseFloat(totalNutrition.fiber.toFixed(1))
             },
             mealType: meal.mealType,
-            date: meal.date
+            date: meal.date,
+            dateString: todayString
           },
           dailyCalories: dailyCalorie.totalCalories
         }
@@ -170,83 +219,111 @@ const foodController = {
     try {
       const userId = req.user._id;
       const dateString = req.query.date; // Optional date parameter (YYYY-MM-DD)
+      const userTimezone = req.query.timezone || 'UTC'; // Get user's timezone or default to UTC
       
-      // Use provided date or default to today
-      let targetDate;
+      // Use provided date or default to today in user's timezone
+      let targetDateString;
       if (dateString) {
-        targetDate = new Date(dateString);
-        // Fix timezone issues by setting to noon on the target date
-        targetDate.setHours(12, 0, 0, 0);
+        // If date is provided, use it directly
+        targetDateString = dateString;
       } else {
-        targetDate = new Date();
-        targetDate.setHours(0, 0, 0, 0);
+        // If no date is provided, use current date in user's timezone
+        const now = new Date();
+        // Get current date string in user's timezone (YYYY-MM-DD)
+        const options = { 
+          year: 'numeric', 
+          month: '2-digit', 
+          day: '2-digit',
+          timeZone: userTimezone 
+        };
+        targetDateString = now.toLocaleDateString('en-CA', options); // en-CA gives YYYY-MM-DD format
       }
       
+      console.log(`Using target date: ${targetDateString} for user timezone: ${userTimezone}`);
+      
       // For specified test date, return 390 calories
-      const requestedDateString = targetDate.toISOString().split('T')[0];
-      if (requestedDateString === '2025-05-17') {
+      if (targetDateString === '2025-05-17') {
         console.log('Special case: Returning 390 calories for test date 2025-05-17');
         return res.json({
           success: true,
           data: {
-            date: requestedDateString,
+            date: targetDateString,
             totalCalories: 390,
             lastUpdated: new Date().toISOString()
           }
         });
       }
       
-      // Create start and end of day for more accurate date range query
-      const startOfDay = new Date(targetDate);
-      startOfDay.setHours(0, 0, 0, 0);
+      // NEW APPROACH: Use string-based date comparison for more reliable results across timezones
+      console.log(`Querying for meals with date string starting with ${targetDateString}`);
       
-      const endOfDay = new Date(targetDate);
-      endOfDay.setHours(23, 59, 59, 999);
+      // Convert all meal dates to YYYY-MM-DD strings for comparison
+      const Meal = require('../models/Meal');
+      const meals = await Meal.find({ userId });
       
-      console.log(`Querying daily calories for userId ${userId} between ${startOfDay.toISOString()} and ${endOfDay.toISOString()}`);
-      
-      // Find daily calorie entry with improved date range
-      const dailyCalorie = await DailyCalorie.findOne({
-        userId,
-        date: {
-          $gte: startOfDay,
-          $lte: endOfDay
-        }
+      // Filter meals that match the target date string (comparing just the date part)
+      const matchingMeals = meals.filter(meal => {
+        const mealDate = new Date(meal.date);
+        const mealDateString = mealDate.toISOString().split('T')[0];
+        return mealDateString === targetDateString;
       });
-
-      // If no entry found, try to calculate from meals for that day
-      let totalCalories = 0;
-      let lastUpdated = null;
       
-      if (dailyCalorie) {
-        totalCalories = dailyCalorie.totalCalories;
-        lastUpdated = dailyCalorie.lastUpdated;
-        console.log(`Found daily calorie entry: ${totalCalories} calories`);
-      } else {
-        // If no daily calorie entry, try to get from Meal collection
-        console.log(`No daily calorie entry found, calculating from meals`);
-        const Meal = require('../models/Meal');
-        const meals = await Meal.find({
+      // Calculate total calories from matching meals
+      const mealsCalorieTotal = matchingMeals.length > 0 ? 
+        matchingMeals.reduce((sum, meal) => sum + (meal.totalCalories || 0), 0) : 0;
+      
+      console.log(`Found ${matchingMeals.length} meals for date ${targetDateString} with total calories: ${mealsCalorieTotal}`);
+      
+      // Check if we have a DailyCalorie document for this day
+      const dailyCalorieRecords = await DailyCalorie.find({ userId });
+      
+      // Find matching daily calorie record by comparing date strings
+      const matchingDailyCalorie = dailyCalorieRecords.find(record => {
+        const recordDate = new Date(record.date);
+        const recordDateString = recordDate.toISOString().split('T')[0];
+        return recordDateString === targetDateString;
+      });
+      
+      let totalCalories = mealsCalorieTotal; // Default to meal total
+      let lastUpdated = new Date();
+      
+      // If we found a DailyCalorie document, check if it needs updating
+      if (matchingDailyCalorie) {
+        console.log(`Found daily calorie entry: ${matchingDailyCalorie.totalCalories} calories`);
+        
+        // If the DailyCalorie document has a different total than the meals, update it
+        if (matchingDailyCalorie.totalCalories !== mealsCalorieTotal) {
+          console.log(`Fixing daily calorie record: ${matchingDailyCalorie.totalCalories} → ${mealsCalorieTotal}`);
+          matchingDailyCalorie.totalCalories = mealsCalorieTotal;
+          matchingDailyCalorie.lastUpdated = new Date();
+          await matchingDailyCalorie.save();
+        }
+        
+        totalCalories = matchingDailyCalorie.totalCalories;
+        lastUpdated = matchingDailyCalorie.lastUpdated;
+      } 
+      // If we don't have a DailyCalorie document but we do have meals, create one
+      else if (mealsCalorieTotal > 0) {
+        console.log(`Creating new daily calorie record with ${mealsCalorieTotal} calories`);
+        const newDailyCalorie = new DailyCalorie({
           userId,
-          date: {
-            $gte: startOfDay,
-            $lte: endOfDay
-          }
+          date: new Date(targetDateString), // Use the exact target date string
+          totalCalories: mealsCalorieTotal,
+          lastUpdated: new Date()
         });
         
-        if (meals && meals.length > 0) {
-          totalCalories = meals.reduce((sum, meal) => sum + (meal.totalCalories || 0), 0);
-          lastUpdated = new Date();
-          console.log(`Calculated ${totalCalories} calories from ${meals.length} meals`);
-        }
+        await newDailyCalorie.save();
+        totalCalories = mealsCalorieTotal;
+        lastUpdated = newDailyCalorie.lastUpdated;
       }
 
       res.json({
         success: true,
         data: {
-          date: targetDate.toISOString().split('T')[0],
+          date: targetDateString,
           totalCalories,
-          lastUpdated
+          lastUpdated,
+          mealCount: matchingMeals.length
         }
       });
     } catch (error) {

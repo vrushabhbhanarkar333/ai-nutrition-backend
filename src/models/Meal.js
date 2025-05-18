@@ -54,6 +54,14 @@ const mealSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   },
+  // Add dateString field for timezone-independent date filtering
+  dateString: {
+    type: String,
+    // Format: YYYY-MM-DD
+    default: function() {
+      return new Date().toISOString().split('T')[0];
+    }
+  },
   mealType: {
     type: String,
     enum: ['breakfast', 'lunch', 'dinner', 'snack'],
@@ -69,5 +77,7 @@ const mealSchema = new mongoose.Schema({
 
 // Create index for efficient querying
 mealSchema.index({ userId: 1, date: -1 });
+// Add index for the dateString field for faster lookups
+mealSchema.index({ userId: 1, dateString: 1 });
 
 module.exports = mongoose.model('Meal', mealSchema);

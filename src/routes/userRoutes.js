@@ -5,7 +5,10 @@ const auth = require('../middleware/auth');
 
 // Public routes
 router.post('/register', userController.register);
+router.post('/register-with-profile', userController.registerWithProfile);
 router.post('/login', userController.login);
+router.post('/check-email', userController.checkEmailExists);
+router.post('/logout', userController.logout);
 
 // Protected routes
 router.get('/profile', auth, userController.getProfile);
